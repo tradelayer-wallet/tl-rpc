@@ -4,9 +4,7 @@
   "description": "Comunicating with TradeLayer Node via JSON-RPC",
   "main": "./lib/index.js",
   "scripts": {
-    "build": "tsc",
-    "format": "prettier --write \"src/**/*.ts\" \"src/**/*.js\"",
-    "lint": "tslint -p tsconfig.json"
+    "build": "tsc"
   },
   "keywords": [
     "rpc",
