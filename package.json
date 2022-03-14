@@ -1,0 +1,25 @@
+{
+  "name": "tl-rpc",
+  "version": "1.0.1",
+  "description": "Comunicating with TradeLayer Node via JSON-RPC",
+  "main": "./lib/index.js",
+  "scripts": {
+    "build": "tsc",
+    "format": "prettier --write \"src/**/*.ts\" \"src/**/*.js\"",
+    "lint": "tslint -p tsconfig.json"
+  },
+  "keywords": [
+    "rpc",
+    "tradelayer",
+    "litecoin"
+  ],
+  "author": "Valentin Peshev",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/valiopld/rl-rpc.git"
+  },
+  "devDependencies": {
+    "@types/node": "^17.0.21"
+  }
+}
