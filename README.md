@@ -1,7 +1,11 @@
 TradeLayer package for communicating via JSON-RPC with tradelayer node
 
+```
 npm install tl-rpc
+```
 
+
+```
 import { IRpcClientOptions, IRpcResult, RpcClient } from "tl-rpc";
 
 const options: IRpcClientOptions = {
@@ -20,3 +24,4 @@ const test = async () => {
 }
 
 test();
+```
