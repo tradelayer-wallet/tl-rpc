@@ -1,7 +1,9 @@
 import * as http from 'http';
-import { IRpcClientOptions, IRpcResult } from '../types/types';
+import { IComplex, IRpcClientOptions, IRpcResult } from '../types/types';
+import { Complex } from './complex';
 
 export class RpcClient {
+  private _complex: IComplex;
   private options: IRpcClientOptions = {
     username: 'root',
     password: 'passsword',
@@ -9,8 +11,14 @@ export class RpcClient {
     port: 9332,
     timeout: 3000,
   };
+
   constructor(options: IRpcClientOptions) {
     this.options = { ...this.options, ...options };
+    this._complex = new Complex(this);
+  }
+
+  get complex() {
+    return this._complex;
   }
 
   async call(method: string, ...args: any[]): Promise<IRpcResult> {

@@ -13,3 +13,7 @@ export interface IRpcResult {
   IECode?: number;
   EECode?: number;
 }
+
+export interface IComplex {
+  bestBlock: () => Promise<IRpcResult>;
+}

@@ -1,6 +1,6 @@
 {
   "name": "tl-rpc",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Comunicating with TradeLayer Node via JSON-RPC",
   "main": "./lib/index.js",
   "scripts": {
