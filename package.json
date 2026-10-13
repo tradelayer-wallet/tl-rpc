@@ -4,7 +4,8 @@
   "description": "Comunicating with TradeLayer Node via JSON-RPC",
   "main": "./lib/index.js",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "npm run build && node --test test/rpc-client.test.js"
   },
   "keywords": [
     "rpc",

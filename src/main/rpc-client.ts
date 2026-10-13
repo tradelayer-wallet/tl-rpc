@@ -60,6 +60,9 @@ export class RpcClient {
             // non-ASCII param would otherwise declare too few bytes and desync
             // the request framing.
             'Content-Length': Buffer.byteLength(requestJSON),
+            // Ask every hop not to re-encode the response: the body must be
+            // the bytes the node produced, and the decode below assumes it.
+            'Accept-Encoding': 'identity',
           },
           agent: false,
           auth: username + ':' + password,
@@ -86,8 +89,11 @@ export class RpcClient {
         done({ error: error.message });
       });
       request.on('response', (response: http.IncomingMessage) => {
-        let buffer = '';
-        response.on('data', (chunk: any) => (buffer += chunk));
+        // Collect raw bytes and decode once, after the full body has arrived.
+        // Decoding each chunk as it comes (`buffer += chunk`) corrupts a UTF-8
+        // sequence split across TCP segments: each half becomes U+FFFD.
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
         // A connection that dies mid-body never emits 'end'; without these the
         // promise would stay pending forever. Resolve ECONNRESET and free the
         // socket instead of deadlocking.
@@ -103,6 +109,7 @@ export class RpcClient {
         response.on('end', () => {
           const { statusCode } = response;
           try {
+            const buffer = Buffer.concat(chunks).toString('utf8');
             if (statusCode === 401) return done({ error: 'Unauthorized', statusCode, IECode: 4 });
             // if (statusCode !== 200) return done({ error: 'Undefined Error', statusCode, IECode: 5 })
             const decRes = JSON.parse(buffer);
