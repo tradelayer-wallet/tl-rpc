@@ -57,6 +57,9 @@ export interface IRpcClientOptions {
    * Milliseconds before the call is aborted with `{ error: 'ETIMEDOUT' }`.
    * Covers the whole exchange, including the response body: a server that
    * sends headers and then stalls can no longer hold the call open forever.
+   * Non-finite values and values below 1 ms fall back to the default (3000
+   * ms); fractions are rounded down; values above 2^31-1 are capped there,
+   * because `setTimeout` fires immediately on a larger delay.
    */
   timeout: number;
   /**
@@ -79,6 +82,16 @@ export interface IRpcClientOptions {
    * disabling verification.
    */
   tls?: IRpcTlsOptions;
+  /**
+   * Maximum response-body size in bytes. Defaults to 32 MiB (33554432). A
+   * response over the limit is aborted as soon as the limit is crossed (or
+   * refused up front when its Content-Length is over it), and the call
+   * resolves `{ error: 'E2BIG' }`. Non-finite values and values below 1 fall
+   * back to the default; fractions are rounded down; values above 2^31-1 are
+   * capped there, and at Node's maximum string length (which bounds the
+   * decode).
+   */
+  maxResponseBytes?: number;
 }
 
 export interface IRpcResult {

@@ -255,3 +255,127 @@ test('N11: allowlisted tls.ca is honored (private-CA deployment works, untrusted
     await tcp.close();
   }
 });
+
+// N15: response bodies are capped while streaming. The socket is destroyed as
+// soon as the cap is crossed, so the server stops sending instead of the
+// client buffering the whole body.
+test('N15: a body over maxResponseBytes (no Content-Length) aborts early with E2BIG', async () => {
+  const chunk = Buffer.alloc(1024, 0x61); // 1 KiB
+  const totalChunks = 200;
+  let serverStopped = false;
+  let chunksWritten = 0;
+  const srv = await rawServer(async (socket) => {
+    socket.on('close', () => {
+      serverStopped = true;
+    });
+    socket.write('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n');
+    for (let i = 0; i < totalChunks; i++) {
+      if (socket.destroyed) break;
+      socket.write(chunk.length.toString(16) + '\r\n');
+      socket.write(chunk);
+      socket.write('\r\n');
+      chunksWritten++;
+      await sleep(5);
+    }
+    socket.end('0\r\n\r\n');
+  });
+  try {
+    const client = new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000, maxResponseBytes: 8 * 1024 });
+    const res = await client.call('x');
+    assert.equal(res.error, 'E2BIG', JSON.stringify(res));
+    assert.equal(res.data, undefined);
+    await sleep(100);
+    assert.equal(serverStopped, true, 'client did not destroy the socket');
+    assert.ok(chunksWritten < totalChunks, `server sent all ${chunksWritten} chunks`);
+  } finally {
+    await srv.close();
+  }
+});
+
+// N15: a declared Content-Length over the cap is refused before any body byte
+// is read.
+test('N15: a Content-Length over maxResponseBytes is refused up front with E2BIG', async () => {
+  const body = 'y'.repeat(64 * 1024);
+  const srv = await rawServer((socket) => {
+    socket.write(`HTTP/1.1 200 OK\r\nContent-Length: ${body.length}\r\n\r\n`);
+    socket.end(body);
+  });
+  try {
+    const client = new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000, maxResponseBytes: 1024 });
+    const res = await client.call('x');
+    assert.equal(res.error, 'E2BIG', JSON.stringify(res));
+  } finally {
+    await srv.close();
+  }
+});
+
+test('N15: a body within maxResponseBytes is returned in full', async () => {
+  const big = 'z'.repeat(256 * 1024);
+  const srv = await rawServer((socket) => {
+    const r = jsonResponse(200, { result: big, error: null, id: 1 });
+    socket.end(r.head + r.body.toString('utf8'));
+  });
+  try {
+    const client = new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000, maxResponseBytes: 1024 * 1024 });
+    const res = await client.call('x');
+    assert.equal(res.data, big);
+  } finally {
+    await srv.close();
+  }
+});
+
+// N16: a timeout that is not a usable number must not disable or shorten the
+// deadline. undefined, 0, fractions below 1, NaN and Infinity fall back to the
+// 3000 ms default, so a 300 ms response succeeds.
+for (const timeout of [undefined, 0, 0.5, NaN, Infinity, -1]) {
+  test(`N16: timeout=${timeout} falls back to the default and does not fire early`, async () => {
+    const srv = await rawServer((socket) => {
+      setTimeout(() => {
+        const r = jsonResponse(200, { result: 'ok', error: null, id: 1 });
+        socket.end(r.head + r.body.toString('utf8'));
+      }, 300);
+    });
+    try {
+      const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout }).call('x');
+      assert.equal(res.data, 'ok', JSON.stringify(res));
+    } finally {
+      await srv.close();
+    }
+  });
+}
+
+// N16: a timeout above setTimeout's ceiling is capped instead of overflowing
+// (which would fire at once and emit TimeoutOverflowWarning).
+test('N16: timeout above 2^31-1 is capped without a TimeoutOverflowWarning', async () => {
+  const warnings = [];
+  const onWarning = (w) => warnings.push(w.name);
+  process.on('warning', onWarning);
+  const srv = await rawServer((socket) => {
+    setTimeout(() => {
+      const r = jsonResponse(200, { result: 'ok', error: null, id: 1 });
+      socket.end(r.head + r.body.toString('utf8'));
+    }, 100);
+  });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 2 ** 32 }).call('x');
+    await sleep(10);
+    assert.equal(res.data, 'ok', JSON.stringify(res));
+    assert.deepEqual(warnings, []);
+  } finally {
+    process.off('warning', onWarning);
+    await srv.close();
+  }
+});
+
+// The normalized timeout is still enforced when it is a usable value.
+test('N16: a stalled response still times out at the configured timeout', async () => {
+  const srv = await rawServer(() => {});
+  try {
+    const started = Date.now();
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 200 }).call('x');
+    assert.equal(res.error, 'ETIMEDOUT');
+    assert.ok(Date.now() - started < 2000);
+  } finally {
+    await srv.close();
+  }
+});
