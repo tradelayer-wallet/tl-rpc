@@ -25,60 +25,97 @@ export class RpcClient {
   }
 
   async call(method: string, ...args: any[]): Promise<IRpcResult> {
-    const requestObj = {
-      id: this._nextRequestId++,
-      method: method,
-      params: args,
-    };
-    const requestJSON = JSON.stringify(requestObj);
-    const { host, port, username, password, timeout, secure } = this.options;
-    const requestOptions = {
-      host: host,
-      port: port,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        // Must be the UTF-8 byte length, not the JS string length: a
-        // non-ASCII param would otherwise declare too few bytes and desync
-        // the request framing.
-        'Content-Length': Buffer.byteLength(requestJSON),
-      },
-      agent: false,
-      auth: username + ':' + password,
-    };
-    const request = (secure ? https : http).request(requestOptions);
+    const { host, port, username, password, timeout, secure, tls } = this.options;
 
-    return new Promise((res, rej) => {
-      const reqTimeOut = setTimeout(() => {
-        // Free the socket; otherwise a timed-out call leaks a socket + timer
-        // and a late response still runs the handler.
-        request.destroy();
-        res({ error: 'ETIMEDOUT' });
+    // The promise must never reject: every failure path resolves { error }.
+    return new Promise((res) => {
+      let request: http.ClientRequest | undefined;
+      let requestJSON = '';
+      let reqTimeOut: ReturnType<typeof setTimeout> | undefined;
+      // Every terminal path funnels through here: first settlement wins and
+      // the timeout is always cleared with it.
+      const done = (result: IRpcResult) => {
+        if (reqTimeOut !== undefined) clearTimeout(reqTimeOut);
+        res(result);
+      };
+
+      try {
+        const requestObj = {
+          id: this._nextRequestId++,
+          method: method,
+          params: args,
+        };
+        // JSON.stringify throws on circular params — resolve, don't reject.
+        requestJSON = JSON.stringify(requestObj);
+        // TLS passthrough first so it cannot override request framing,
+        // credentials or headers owned by the client below.
+        const requestOptions: https.RequestOptions = {
+          ...(secure ? tls : undefined),
+          host: host,
+          port: port,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            // Must be the UTF-8 byte length, not the JS string length: a
+            // non-ASCII param would otherwise declare too few bytes and desync
+            // the request framing.
+            'Content-Length': Buffer.byteLength(requestJSON),
+          },
+          agent: false,
+          auth: username + ':' + password,
+        };
+        // Construction throws on e.g. an out-of-range port — resolve, don't reject.
+        request = secure
+          ? https.request(requestOptions)
+          : http.request(requestOptions);
+      } catch (error: any) {
+        return done({ error: error.message });
+      }
+
+      // Armed before any I/O and kept armed until the response body has
+      // completed: headers arriving is not the end of the exchange, and a
+      // server that stalls mid-body must not hold the call open (and its
+      // socket) forever.
+      reqTimeOut = setTimeout(() => {
+        done({ error: 'ETIMEDOUT' });
+        request?.destroy();
       }, timeout);
+
       request.on('error', (error: any) => {
-        clearTimeout(reqTimeOut);
-        res({ error: error.message });
+        request?.destroy();
+        done({ error: error.message });
       });
-      request.on('response', (response: any) => {
-        clearTimeout(reqTimeOut);
+      request.on('response', (response: http.IncomingMessage) => {
         let buffer = '';
         response.on('data', (chunk: any) => (buffer += chunk));
+        // A connection that dies mid-body never emits 'end'; without these the
+        // promise would stay pending forever. Resolve ECONNRESET and free the
+        // socket instead of deadlocking.
+        const bodyBroken = () => {
+          request?.destroy();
+          done({ error: 'ECONNRESET' });
+        };
+        response.on('aborted', bodyBroken);
+        response.on('error', bodyBroken);
+        response.on('close', () => {
+          if (!response.complete) bodyBroken();
+        });
         response.on('end', () => {
           const { statusCode } = response;
           try {
-            if (statusCode === 401) return res({ error: 'Unauthorized', statusCode, IECode: 4 });
-            // if (statusCode !== 200) return res({ error: 'Undefined Error', statusCode, IECode: 5 })
+            if (statusCode === 401) return done({ error: 'Unauthorized', statusCode, IECode: 4 });
+            // if (statusCode !== 200) return done({ error: 'Undefined Error', statusCode, IECode: 5 })
             const decRes = JSON.parse(buffer);
             decRes.hasOwnProperty('error') && decRes.error !== null
-              ? res({
+              ? done({
                   error: decRes.error.message,
                   statusCode,
                   IECode: 2,
                   EECode: decRes.error.code || 0,
                 })
               : decRes.hasOwnProperty('result')
-              ? res({ data: decRes.result, statusCode })
-              : res({
+              ? done({ data: decRes.result, statusCode })
+              : done({
                   error: decRes.error?.message || 'Undefined Error',
                   statusCode,
                   IECode: 3,
@@ -86,13 +123,18 @@ export class RpcClient {
                 });
           } catch (error: any) {
             statusCode !== 200
-              ? res({ error: error.message, statusCode })
-              : res({ error: error.message, statusCode, IECode: 1 });
+              ? done({ error: error.message, statusCode })
+              : done({ error: error.message, statusCode, IECode: 1 });
           }
         });
       });
 
-      request.end(requestJSON);
+      try {
+        request.end(requestJSON);
+      } catch (error: any) {
+        request.destroy();
+        done({ error: error.message });
+      }
     });
   }
 }
