@@ -1,15 +1,18 @@
 import * as http from 'http';
+import * as https from 'https';
 import { IComplex, IRpcClientOptions, IRpcResult } from '../types/types';
 import { Complex } from './complex';
 
 export class RpcClient {
   private _complex: IComplex;
+  private _nextRequestId = 1;
   private options: IRpcClientOptions = {
     username: 'root',
     password: 'passsword',
     host: 'localhost',
     port: 9332,
     timeout: 3000,
+    secure: false,
   };
 
   constructor(options: IRpcClientOptions) {
@@ -23,28 +26,39 @@ export class RpcClient {
 
   async call(method: string, ...args: any[]): Promise<IRpcResult> {
     const requestObj = {
-      id: Date.now(),
+      id: this._nextRequestId++,
       method: method,
       params: args,
     };
     const requestJSON = JSON.stringify(requestObj);
-    const { host, port, username, password, timeout } = this.options;
+    const { host, port, username, password, timeout, secure } = this.options;
     const requestOptions = {
       host: host,
       port: port,
       method: 'POST',
       headers: {
-        Host: 'localhost',
-        'Content-Length': requestJSON.length,
+        'Content-Type': 'application/json',
+        // Must be the UTF-8 byte length, not the JS string length: a
+        // non-ASCII param would otherwise declare too few bytes and desync
+        // the request framing.
+        'Content-Length': Buffer.byteLength(requestJSON),
       },
       agent: false,
       auth: username + ':' + password,
     };
-    const request = http.request(requestOptions);
+    const request = (secure ? https : http).request(requestOptions);
 
     return new Promise((res, rej) => {
-      const reqTimeOut = setTimeout(() => res({ error: 'ETIMEDOUT' }), timeout);
-      request.on('error', (error: any) => res({ error: error.message }));
+      const reqTimeOut = setTimeout(() => {
+        // Free the socket; otherwise a timed-out call leaks a socket + timer
+        // and a late response still runs the handler.
+        request.destroy();
+        res({ error: 'ETIMEDOUT' });
+      }, timeout);
+      request.on('error', (error: any) => {
+        clearTimeout(reqTimeOut);
+        res({ error: error.message });
+      });
       request.on('response', (response: any) => {
         clearTimeout(reqTimeOut);
         let buffer = '';
