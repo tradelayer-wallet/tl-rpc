@@ -1,2 +1,2 @@
 export { RpcClient } from './main/rpc-client';
-export { IRpcClientOptions, IRpcResult } from './types/types';
+export { IRpcClientOptions, IRpcResult, IRpcTlsOptions } from './types/types';

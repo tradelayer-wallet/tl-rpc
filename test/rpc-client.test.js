@@ -2,9 +2,15 @@
 // Regression tests for RpcClient. Run with `npm test` (builds lib/ first).
 // Each test exercises a finding from the security review; the comment on each
 // test names the finding and the behaviour it pins down.
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const http = require('node:http');
+const https = require('node:https');
 const net = require('node:net');
+const os = require('node:os');
+const path = require('node:path');
 const { RpcClient } = require('../lib/index.js');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -124,5 +130,128 @@ test('N5: request sends Accept-Encoding: identity', async () => {
     assert.match(seenHead, /^accept-encoding: identity$/im);
   } finally {
     await srv.close();
+  }
+});
+
+// --- TLS fixtures (N11) -----------------------------------------------------
+// A throwaway self-signed certificate is generated with the openssl CLI into a
+// temp dir (nothing is committed). Tests that need it are skipped if openssl
+// is not installed.
+let tlsFixture = null;
+let tlsFixtureError = null;
+try {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tl-rpc-test-'));
+  after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const keyPath = path.join(dir, 'key.pem');
+  const certPath = path.join(dir, 'cert.pem');
+  execFileSync(
+    'openssl',
+    ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes',
+      '-keyout', keyPath, '-out', certPath, '-days', '2', '-subj', '/CN=localhost',
+      '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'],
+    { stdio: 'ignore' }
+  );
+  tlsFixture = { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath), dir };
+} catch (err) {
+  tlsFixtureError = err.message;
+}
+const tlsSkip = tlsFixture ? false : `openssl unavailable: ${tlsFixtureError}`;
+
+function tlsServer(onRequest) {
+  const server = https.createServer({ key: tlsFixture.key, cert: tlsFixture.cert }, onRequest);
+  return new Promise((resolve) =>
+    server.listen(0, '127.0.0.1', () =>
+      resolve({ port: server.address().port, close: () => new Promise((r) => server.close(r)) })
+    )
+  );
+}
+
+// N11: a `tls` object must not be able to redirect the connection or change
+// request framing/credentials. Only the ten allowlisted TLS fields are used.
+test('N11: tls.socketPath / createConnection / lookup / framing overrides are ignored', { skip: tlsSkip }, async () => {
+  const unixPath = path.join(tlsFixture.dir, 'evil.sock');
+  let unixHits = 0;
+  const unix = net.createServer((sock) => {
+    unixHits++;
+    sock.destroy();
+  });
+  await new Promise((r) => unix.listen(unixPath, r));
+
+  let seen = null;
+  const tcp = await tlsServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      seen = { method: req.method, auth: req.headers.authorization, evil: req.headers['x-evil'], body };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ result: 'tcp', error: null, id: 1 }));
+    });
+  });
+
+  let createConnectionCalls = 0;
+  let lookupCalls = 0;
+  try {
+    const client = new RpcClient({
+      username: 'alice',
+      password: 'pw',
+      host: '127.0.0.1',
+      port: tcp.port,
+      timeout: 5000,
+      secure: true,
+      tls: {
+        ca: tlsFixture.cert,
+        servername: 'localhost',
+        socketPath: unixPath,
+        createConnection: () => {
+          createConnectionCalls++;
+          return net.connect(unixPath);
+        },
+        lookup: (h, o, cb) => {
+          lookupCalls++;
+          cb(null, '127.0.0.1', 4);
+        },
+        setHost: false,
+        agent: new https.Agent(),
+        headers: { 'X-Evil': 'yes', 'Content-Length': '1' },
+        method: 'GET',
+        auth: 'evil:evil',
+        path: '/evil',
+      },
+    });
+    const res = await client.call('getinfo', 'arg');
+    assert.equal(res.data, 'tcp', JSON.stringify(res));
+    assert.equal(unixHits, 0, 'tls.socketPath redirected the connection');
+    assert.equal(createConnectionCalls, 0, 'tls.createConnection was called');
+    assert.equal(lookupCalls, 0, 'tls.lookup was called');
+    assert.equal(seen.method, 'POST');
+    assert.equal(seen.auth, 'Basic ' + Buffer.from('alice:pw').toString('base64'));
+    assert.equal(seen.evil, undefined);
+    assert.equal(JSON.parse(seen.body).method, 'getinfo');
+  } finally {
+    await tcp.close();
+    await new Promise((r) => unix.close(r));
+  }
+});
+
+// N11 (positive side): the allowlisted fields still work, so a private-CA
+// deployment is not broken by the allowlist.
+test('N11: allowlisted tls.ca is honored (private-CA deployment works, untrusted fails)', { skip: tlsSkip }, async () => {
+  const tcp = await tlsServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ result: 'pinned', error: null, id: 1 }));
+  });
+  try {
+    const untrusted = await new RpcClient({
+      host: 'localhost', port: tcp.port, timeout: 5000, secure: true,
+    }).call('x');
+    assert.equal(untrusted.data, undefined, 'self-signed cert accepted without ca');
+    assert.ok(untrusted.error, 'expected a certificate error');
+
+    const pinned = await new RpcClient({
+      host: 'localhost', port: tcp.port, timeout: 5000, secure: true, tls: { ca: tlsFixture.cert },
+    }).call('x');
+    assert.equal(pinned.data, 'pinned', JSON.stringify(pinned));
+  } finally {
+    await tcp.close();
   }
 });

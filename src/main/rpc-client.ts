@@ -1,7 +1,36 @@
 import * as http from 'http';
 import * as https from 'https';
-import { IComplex, IRpcClientOptions, IRpcResult } from '../types/types';
+import { IComplex, IRpcClientOptions, IRpcResult, IRpcTlsOptions } from '../types/types';
 import { Complex } from './complex';
+
+/**
+ * The only `tls` keys the client forwards. The `satisfies` check makes this
+ * list match `IRpcTlsOptions` exactly: a field added to or removed from the
+ * type fails to compile until it is reflected here.
+ */
+const TLS_OPTION_KEYS = Object.keys({
+  ca: true,
+  cert: true,
+  key: true,
+  pfx: true,
+  passphrase: true,
+  rejectUnauthorized: true,
+  servername: true,
+  ciphers: true,
+  minVersion: true,
+  maxVersion: true,
+} satisfies Record<keyof IRpcTlsOptions, true>) as (keyof IRpcTlsOptions)[];
+
+/** Copies only the allowlisted TLS fields; every other key is dropped. */
+const pickTlsOptions = (tls: IRpcTlsOptions | undefined): IRpcTlsOptions => {
+  const picked: Record<string, unknown> = {};
+  if (tls) {
+    for (const key of TLS_OPTION_KEYS) {
+      if (tls[key] !== undefined) picked[key] = tls[key];
+    }
+  }
+  return picked as IRpcTlsOptions;
+};
 
 export class RpcClient {
   private _complex: IComplex;
@@ -47,10 +76,11 @@ export class RpcClient {
         };
         // JSON.stringify throws on circular params — resolve, don't reject.
         requestJSON = JSON.stringify(requestObj);
-        // TLS passthrough first so it cannot override request framing,
-        // credentials or headers owned by the client below.
         const requestOptions: https.RequestOptions = {
-          ...(secure ? tls : undefined),
+          // Only allowlisted TLS fields are spread in. The client-owned fields
+          // below come after, so they could not be overridden even if the
+          // allowlist grew.
+          ...(secure ? pickTlsOptions(tls) : {}),
           host: host,
           port: port,
           method: 'POST',
