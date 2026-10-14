@@ -807,3 +807,72 @@ test('Numbers: inputs that JSON.parse rejects are rejected too', () => {
     assert.throws(() => parseLosslessJson(text), SyntaxError, text);
   }
 });
+
+// Round 6: a bigint in an error envelope and in complex.bestBlock. Before the
+// fix the error code above 2^53 became EECode 0, and a bigint height was
+// returned under a `number` type.
+test('Numbers: a bigint error.code keeps its numeric value in EECode, as JSON.parse gave', async () => {
+  const srv = await rawBodyServer({
+    body: Buffer.from('{"result":null,"error":{"code":12345678901234567890,"message":"boom"},"id":1}', 'utf8'),
+  });
+  try {
+    const res = await clientFor(srv).call('x');
+    assert.equal(res.error, 'boom');
+    assert.equal(res.IECode, 2);
+    assert.equal(res.EECode, Number(12345678901234567890n));
+  } finally {
+    await srv.close();
+  }
+});
+
+// A two-call node: getbestblockhash, then getblock returning `heightJson`.
+const heightServer = (heightJson) =>
+  rawServer((socket, req) => {
+    const { method } = JSON.parse(req.body);
+    const payload = method === 'getbestblockhash'
+      ? '{"result":"00ab","error":null,"id":1}'
+      : `{"result":{"height":${heightJson}},"error":null,"id":1}`;
+    const body = Buffer.from(payload, 'utf8');
+    socket.end(Buffer.concat([
+      Buffer.from(`HTTP/1.1 200 X\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`, 'latin1'),
+      body,
+    ]));
+  });
+
+test('Numbers: bestBlock returns a safe height as a number', async () => {
+  const srv = await heightServer('830000');
+  try {
+    const bb = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).complex.bestBlock();
+    assert.equal(bb.error, undefined);
+    assert.equal(bb.data, 830000);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Numbers: bestBlock fails rather than returning a bigint height under a number type', async () => {
+  const srv = await heightServer('9007199254740993');
+  try {
+    const bb = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).complex.bestBlock();
+    assert.equal(bb.data, undefined);
+    assert.match(bb.error, /height is not a number/);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Numbers: a bigint request param fails the call with an error and sends nothing', async () => {
+  let received = false;
+  const srv = await rawBodyServer({
+    body: resultBody('1'),
+    onRequest: () => { received = true; },
+  });
+  try {
+    const res = await clientFor(srv).call('sendtoaddress', 9007199254740993n);
+    assert.equal(res.data, undefined);
+    assert.match(res.error, /BigInt/);
+    assert.equal(received, false);
+  } finally {
+    await srv.close();
+  }
+});

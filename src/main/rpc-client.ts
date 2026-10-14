@@ -98,9 +98,11 @@ const rpcErrorMessage = (err: unknown): string => {
   return typeof message === 'string' && message !== '' ? message : 'Undefined Error';
 };
 
+/** JSON-RPC error code. A code outside the safe range is a bigint; it is still reported as a number, as JSON.parse did. */
 const rpcErrorCode = (err: unknown): number => {
   const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === 'number' ? code : 0;
+  if (typeof code === 'number') return code;
+  return typeof code === 'bigint' ? Number(code) : 0;
 };
 
 const DEFAULT_OPTIONS = {
