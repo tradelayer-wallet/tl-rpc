@@ -26,6 +26,8 @@ export const MAX_INTEGER_DIGITS = 1024;
 const MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
 /** Integers with at most this many digits are always safe, so no BigInt is needed. */
 const ALWAYS_SAFE_DIGITS = 15;
+/** Smallest positive normal double. Below it, precision is lost and the fast path does not apply. */
+const MIN_NORMAL_DOUBLE = 2.2250738585072014e-308;
 
 const isDigit = (c: number): boolean => c >= 0x30 && c <= 0x39;
 
@@ -57,6 +59,28 @@ const canonicalize = (text: string): Canonical => {
   digits = digits.slice(0, end);
   if (digits === '') return { neg: false, digits: '', point: 0 };
   return { neg, digits, point };
+};
+
+/**
+ * Number of significant digits in a number token: the digits from the first
+ * non-zero digit to the last non-zero digit, ignoring sign, point and exponent.
+ */
+const significantDigits = (token: string): number => {
+  let seen = 0; // digits counted since the first non-zero digit
+  let trailingZeros = 0;
+  let started = false;
+  for (let i = 0; i < token.length; i++) {
+    const c = token.charCodeAt(i);
+    if (c === 0x65 || c === 0x45) break; // e or E: the exponent follows
+    if (!isDigit(c)) continue; // '-' and '.'
+    if (!started) {
+      if (c === 0x30) continue;
+      started = true;
+    }
+    seen++;
+    trailingZeros = c === 0x30 ? trailingZeros + 1 : 0;
+  }
+  return seen - trailingZeros;
 };
 
 const sameDecimal = (a: Canonical, b: Canonical): boolean =>
@@ -282,6 +306,17 @@ class Parser {
   }
 
   private classify(token: string): number | bigint | RpcDecimalString {
+    // Fast path, with the same result as the general path below. A decimal
+    // with at most 15 significant digits, in the normal double range, round-trips
+    // through a double: its shortest form is its own text. Integers are
+    // excluded (a large integer with few digits, such as 1e20, is a bigint).
+    const sig = significantDigits(token);
+    if (sig === 0) return Number(token); // zero, possibly -0
+    if (sig <= ALWAYS_SAFE_DIGITS) {
+      const d = Number(token);
+      const mag = Math.abs(d);
+      if (mag >= MIN_NORMAL_DOUBLE && mag < Infinity && (!Number.isInteger(d) || mag <= Number.MAX_SAFE_INTEGER)) return d;
+    }
     const c = canonicalize(token);
     if (c.digits === '') return Number(token); // zero, possibly -0
     if (c.point >= c.digits.length) {
