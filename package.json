@@ -5,7 +5,7 @@
   "main": "./lib/index.js",
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node --test test/rpc-client.test.js"
+    "test": "npm run build && node --test test/rpc-client.test.js test/lossless-json.test.js"
   },
   "keywords": [
     "rpc",
