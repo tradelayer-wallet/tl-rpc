@@ -379,3 +379,214 @@ test('N16: a stalled response still times out at the configured timeout', async 
     await srv.close();
   }
 });
+
+// --- Round-3 regressions -----------------------------------------------------
+// A server that answers one request with the given status, headers and raw
+// body bytes (Content-Length is computed here unless Transfer-Encoding is set).
+function rawBodyServer({ status = 200, headers = {}, body = Buffer.alloc(0), onRequest }) {
+  return rawServer((socket, req) => {
+    if (onRequest) onRequest(req);
+    const head = [`HTTP/1.1 ${status} X`];
+    for (const [k, v] of Object.entries(headers)) head.push(`${k}: ${v}`);
+    if (!('Transfer-Encoding' in headers)) head.push(`Content-Length: ${body.length}`);
+    head.push('Connection: close', '', '');
+    socket.end(Buffer.concat([Buffer.from(head.join('\r\n'), 'latin1'), body]));
+  });
+}
+
+// R3 credentials: util.inspect / Object.keys of the client must not print the
+// password. Old code kept the options as an enumerable property.
+test('R3: the client does not expose the password through util.inspect or Object.keys', () => {
+  const util = require('node:util');
+  const client = new RpcClient({ host: '127.0.0.1', port: 9332, username: 'alice', password: 'SECRET-PW-123' });
+  assert.equal(util.inspect(client).includes('SECRET-PW-123'), false);
+  assert.equal(util.inspect(client, { showHidden: true, depth: 10 }).includes('SECRET-PW-123'), false);
+  assert.equal(Object.keys(client).some((k) => k === 'options'), false);
+});
+
+// R3 options: an explicit `undefined` means "not set". Old code let it replace
+// the default, sending the credential "undefined:passsword".
+test('R3: undefined username/password keep the defaults (no "undefined:" credential)', async () => {
+  let auth = null;
+  const srv = await rawBodyServer({
+    body: Buffer.from('{"result":"ok","error":null}'),
+    onRequest: (req) => (auth = /^authorization: (.*)$/im.exec(req.head)[1]),
+  });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000, username: undefined, password: undefined }).call('x');
+    assert.equal(res.data, 'ok', JSON.stringify(res));
+    assert.equal(auth, 'Basic ' + Buffer.from('root:passsword').toString('base64'));
+  } finally {
+    await srv.close();
+  }
+});
+
+// R3 port: Node treats any falsy port as "use the default" (port 80 for HTTP),
+// so the Basic credential would go to whatever listens on port 80. Such a value
+// must be refused before anything is dialed.
+for (const port of [0, NaN, null, '', 65536, -1, 9332.5, 'abc']) {
+  test(`R3: port=${String(port)} resolves Invalid port instead of dialing port 80`, async () => {
+    const res = await new RpcClient({ host: '127.0.0.1', port, timeout: 1000 }).call('x');
+    assert.match(res.error ?? '', /^Invalid port: /, JSON.stringify(res));
+  });
+}
+
+// R3 port: an unset (undefined) port means the default 9332, and a numeric
+// string (e.g. from an environment variable) is accepted as a port number.
+// The http.request spy throws so nothing is dialed.
+test('R3: undefined port uses 9332; a numeric string port is converted to a number', async () => {
+  const seen = [];
+  const realRequest = http.request;
+  http.request = (opts) => {
+    seen.push(opts.port);
+    throw new Error('spy: not dialed');
+  };
+  try {
+    await new RpcClient({ host: '127.0.0.1', port: undefined, timeout: 1000 }).call('x');
+    await new RpcClient({ host: '127.0.0.1', port: '1234', timeout: 1000 }).call('x');
+  } finally {
+    http.request = realRequest;
+  }
+  assert.deepEqual(seen, [9332, 1234]);
+});
+
+// R3 TLS: the allowlisted tls fields are copied when the client is constructed.
+// Old code read the caller's object at each call, so a later change leaked into
+// the request. The https.request spy throws so nothing is dialed.
+test('R3: a tls object changed after construction does not change what a call sends', async () => {
+  const seen = [];
+  const realRequest = https.request;
+  https.request = (opts) => {
+    seen.push(opts.ca);
+    throw new Error('spy: not dialed');
+  };
+  try {
+    const tls = { ca: 'CA-AT-CONSTRUCTION' };
+    const client = new RpcClient({ host: '127.0.0.1', port: 9, timeout: 1000, secure: true, tls });
+    tls.ca = 'CA-MUTATED-LATER';
+    await client.call('x');
+    assert.deepEqual(seen, ['CA-AT-CONSTRUCTION']);
+  } finally {
+    https.request = realRequest;
+  }
+});
+
+// R3 error payload: a JSON-RPC error that is a bare string, or an object without
+// a message, must still produce a non-empty `error`. Old code returned
+// `{ error: undefined, IECode: 2 }`, which callers that test `res.error` read as
+// success.
+test('R3: a JSON-RPC error without a usable message never reads as success', async () => {
+  const cases = [
+    [{ result: null, error: 'boom' }, { error: 'boom', IECode: 2, EECode: 0 }],
+    [{ result: null, error: { code: -5 } }, { error: 'Undefined Error', IECode: 2, EECode: -5 }],
+    [{ result: null, error: { message: '', code: -6 } }, { error: 'Undefined Error', IECode: 2, EECode: -6 }],
+  ];
+  for (const [body, expected] of cases) {
+    const srv = await rawBodyServer({
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+      body: Buffer.from(JSON.stringify(body)),
+    });
+    try {
+      const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
+      assert.equal(res.data, undefined);
+      assert.ok(res.error, `empty error for ${JSON.stringify(body)}: ${JSON.stringify(res)}`);
+      assert.deepEqual({ error: res.error, IECode: res.IECode, EECode: res.EECode }, expected);
+    } finally {
+      await srv.close();
+    }
+  }
+});
+
+// R3 envelope: own-property checks only. A response key named like an Object
+// prototype method used to throw inside the parser and discard a valid result; a
+// non-object envelope is an undefined response, not a TypeError.
+test('R3: envelope keys cannot shadow the own-property checks', async () => {
+  const bodies = [
+    ['{"hasOwnProperty":1,"result":5,"error":null}', { data: 5 }],
+    ['null', { error: 'Undefined Error', IECode: 3, EECode: 0 }],
+  ];
+  for (const [text, expected] of bodies) {
+    const srv = await rawBodyServer({ body: Buffer.from(text) });
+    try {
+      const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
+      assert.deepEqual(
+        Object.fromEntries(Object.entries(res).filter(([k]) => k !== 'statusCode')),
+        expected,
+        JSON.stringify(res)
+      );
+    } finally {
+      await srv.close();
+    }
+  }
+});
+
+// R3 encoding: a body that arrives UTF-8 BOM-prefixed decodes as its JSON text
+// (the BOM is dropped, as a WHATWG decoder does), rather than failing to parse.
+test('R3: a leading UTF-8 BOM is dropped and the JSON parses', async () => {
+  const srv = await rawBodyServer({ body: Buffer.from('﻿{"result":1,"error":null}', 'utf8') });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
+    assert.equal(res.data, 1, JSON.stringify(res));
+  } finally {
+    await srv.close();
+  }
+});
+
+// R3 encoding: invalid UTF-8 is an error, not silently replaced with U+FFFD.
+// Old code returned 'a�b' as if the node had sent that.
+test('R3: invalid UTF-8 in the body fails the call instead of substituting U+FFFD', async () => {
+  const body = Buffer.concat([Buffer.from('{"result":"a'), Buffer.from([0xff]), Buffer.from('b"}')]);
+  const srv = await rawBodyServer({ body });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
+    assert.equal(res.data, undefined, JSON.stringify(res));
+    assert.match(res.error ?? '', /not valid UTF-8/);
+    assert.equal(res.IECode, 1);
+  } finally {
+    await srv.close();
+  }
+});
+
+// R3 encoding: a server that compresses despite `Accept-Encoding: identity` is
+// reported as an unsupported encoding. Old code surfaced a JSON parse error whose
+// message contained the raw compressed bytes.
+test('R3: a compressed response (ignoring identity) fails with Unsupported Content-Encoding', async () => {
+  const zlib = require('node:zlib');
+  const srv = await rawBodyServer({
+    headers: { 'Content-Encoding': 'gzip', 'Content-Type': 'application/json' },
+    body: zlib.gzipSync(Buffer.from('{"result":1,"error":null}')),
+  });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
+    assert.equal(res.error, 'Unsupported Content-Encoding', JSON.stringify(res));
+    assert.equal(res.data, undefined);
+  } finally {
+    await srv.close();
+  }
+});
+
+// R3 encoding: a 401 is still reported as Unauthorized even if its body is compressed.
+test('R3: a 401 with a compressed body still resolves Unauthorized', async () => {
+  const zlib = require('node:zlib');
+  const srv = await rawBodyServer({
+    status: 401,
+    headers: { 'Content-Encoding': 'gzip' },
+    body: zlib.gzipSync(Buffer.from('nope')),
+  });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
+    assert.deepEqual(res, { error: 'Unauthorized', statusCode: 401, IECode: 4 });
+  } finally {
+    await srv.close();
+  }
+});
+
+// R3 hygiene: package-lock.json's root version must match package.json. It was
+// left at 1.0.3 after the package was bumped to 1.0.4.
+test('R3: package-lock.json root version matches package.json', () => {
+  const pkg = JSON.parse(fs.readFileSync(require('node:path').join(__dirname, '..', 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(require('node:path').join(__dirname, '..', 'package-lock.json'), 'utf8'));
+  assert.equal(lock.version, pkg.version);
+  assert.equal(lock.packages[''].version, pkg.version);
+});

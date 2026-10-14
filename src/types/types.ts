@@ -48,11 +48,18 @@ export interface IRpcTlsOptions {
   maxVersion?: tls.SecureContextOptions['maxVersion'];
 }
 
+/**
+ * Client options. Any option set to `undefined` is treated as unset and keeps
+ * its default. `port` must be an integer in 1..65535 (a numeric string is
+ * accepted); any other value makes each call resolve `{ error: 'Invalid port: ...' }`
+ * without connecting.
+ */
 export interface IRpcClientOptions {
   username: string;
   password: string;
   host: string;
-  port: number;
+  /** Integer 1..65535; a numeric string (e.g. from an env var) is also accepted. See the note above. */
+  port: number | string;
   /**
    * Milliseconds before the call is aborted with `{ error: 'ETIMEDOUT' }`.
    * Covers the whole exchange, including the response body: a server that
@@ -78,8 +85,9 @@ export interface IRpcClientOptions {
    * TLS options for HTTPS requests (applied only when `secure: true`), e.g.
    * `{ ca: fs.readFileSync('ca.pem') }` for a private CA. Only the fields
    * listed in {@link IRpcTlsOptions} are honored; every other key is ignored.
-   * Certificate verification stays strict by default; prefer `ca` over
-   * disabling verification.
+   * The allowlisted fields are copied when the client is constructed, so a
+   * later change to this object has no effect. Certificate verification stays
+   * strict by default; prefer `ca` over disabling verification.
    */
   tls?: IRpcTlsOptions;
   /**
