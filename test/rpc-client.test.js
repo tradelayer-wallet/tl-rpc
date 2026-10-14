@@ -590,3 +590,220 @@ test('R3: package-lock.json root version matches package.json', () => {
   assert.equal(lock.version, pkg.version);
   assert.equal(lock.packages[''].version, pkg.version);
 });
+
+// ---------------------------------------------------------------------------
+// Numbers: responses are decoded by a lossless parser (src/main/lossless-json.ts).
+// A JS number is returned only when it holds the source value exactly. Integers
+// outside the safe range come back as bigint; other values that a double would
+// round come back as their original text (RpcDecimalString). See README "Numbers".
+// Under the old JSON.parse decode, each of the precision assertions below failed.
+// ---------------------------------------------------------------------------
+const { parseLosslessJson } = require('../lib/main/lossless-json.js');
+
+const clientFor = (srv) => new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 });
+const resultBody = (resultJson) => Buffer.from(`{"result":${resultJson},"error":null,"id":1}`, 'utf8');
+
+test('Numbers: 9007199254740993 comes back as the exact bigint 9007199254740993n', async () => {
+  const srv = await rawBodyServer({ body: resultBody('9007199254740993') });
+  try {
+    const res = await clientFor(srv).call('x');
+    assert.equal(res.data, 9007199254740993n, JSON.stringify(res, (_, v) => String(v)));
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Numbers: 12345678901234567890 (a property-sized total) comes back as a bigint', async () => {
+  const srv = await rawBodyServer({ body: resultBody('{"balance":12345678901234567890}') });
+  try {
+    const res = await clientFor(srv).call('x');
+    assert.equal(res.data.balance, 12345678901234567890n);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Numbers: the safe-integer boundary: 2^53-1 is a number, 2^53 is a bigint', () => {
+  assert.equal(parseLosslessJson('9007199254740991'), 9007199254740991);
+  assert.equal(parseLosslessJson('-9007199254740991'), -9007199254740991);
+  assert.equal(parseLosslessJson('9007199254740992'), 9007199254740992n);
+  assert.equal(parseLosslessJson('-9007199254740992'), -9007199254740992n);
+});
+
+test('Numbers: decimals that round-trip stay numbers (0.1 is 0.1)', () => {
+  assert.equal(parseLosslessJson('0.1'), 0.1);
+  assert.equal(parseLosslessJson('1.50'), 1.5);
+  assert.equal(parseLosslessJson('0.1e1'), 1);
+  assert.equal(parseLosslessJson('1.5e-300'), 1.5e-300);
+  assert.equal(parseLosslessJson('-2.25'), -2.25);
+});
+
+test('Numbers: a decimal a double would round is kept as its exact text', () => {
+  const text = '0.10000000000000000001';
+  assert.equal(parseLosslessJson(text), text);
+  assert.equal(typeof parseLosslessJson(text), 'string');
+  assert.equal(parseLosslessJson('123456789012345678.5'), '123456789012345678.5');
+  // Underflow: Number('1e-400') is 0, which does not denote the same value.
+  assert.equal(parseLosslessJson('1e-400'), '1e-400');
+});
+
+test('Numbers: exponent forms are read by value; 1e400 is the exact bigint, not Infinity', () => {
+  assert.equal(parseLosslessJson('1E2'), 100);
+  assert.equal(parseLosslessJson('1.5e3'), 1500);
+  assert.equal(parseLosslessJson('1e15'), 1e15);
+  assert.equal(parseLosslessJson('1e400'), 10n ** 400n);
+  assert.equal(parseLosslessJson('-1e400'), -(10n ** 400n));
+});
+
+test('Numbers: -0 is the number -0, as with JSON.parse', () => {
+  assert.ok(Object.is(parseLosslessJson('-0'), -0));
+  assert.ok(Object.is(parseLosslessJson('-0.0'), -0));
+  assert.ok(Object.is(parseLosslessJson('0'), 0));
+});
+
+test('Numbers: tokens that are not JSON numbers are rejected (leading zeros, bare dot, plus, NaN, Infinity)', async () => {
+  const bad = ['01', '-01', '1.', '.5', '+1', '-', '1e', '1e+', '0x10', 'NaN', 'Infinity', '-Infinity', '1 2', '[1,]', '{"a":1,}'];
+  for (const text of bad) {
+    assert.throws(() => parseLosslessJson(text), SyntaxError, text);
+    assert.throws(() => parseLosslessJson(JSON.stringify([0]).replace('0', text)), SyntaxError, text);
+  }
+  const srv = await rawBodyServer({ body: Buffer.from('{"result":01,"error":null}') });
+  try {
+    const res = await clientFor(srv).call('x');
+    assert.equal(res.data, undefined);
+    assert.equal(res.IECode, 1);
+    assert.equal(res.statusCode, 200);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Numbers: the error envelope stays intact when ids are above 2^53', async () => {
+  const srv = await rawBodyServer({
+    body: Buffer.from('{"result":null,"error":{"code":-5,"message":"No such account"},"id":9007199254740993}', 'utf8'),
+  });
+  try {
+    const res = await clientFor(srv).call('x');
+    assert.equal(res.error, 'No such account');
+    assert.equal(res.EECode, -5);
+    assert.equal(res.IECode, 2);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Numbers: a bigint inside a nested result reaches the caller unchanged', async () => {
+  const srv = await rawBodyServer({
+    body: resultBody('{"height":830000,"amounts":[9007199254740993,0.5,"9007199254740993"],"hash":"00ab"}'),
+  });
+  try {
+    const res = await clientFor(srv).call('x');
+    assert.equal(res.data.height, 830000);
+    assert.deepEqual(res.data.amounts, [9007199254740993n, 0.5, '9007199254740993']);
+    assert.equal(res.data.hash, '00ab');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Numbers: nesting up to 128 levels parses; 129 is rejected with IECode 1', async () => {
+  const nest = (n) => '['.repeat(n) + ']'.repeat(n);
+  assert.doesNotThrow(() => parseLosslessJson(nest(128)));
+  assert.throws(() => parseLosslessJson(nest(129)), /Nesting deeper than 128/);
+  const srv = await rawBodyServer({ body: Buffer.from(`{"result":${nest(129)},"error":null}`) });
+  try {
+    const res = await clientFor(srv).call('x');
+    assert.equal(res.data, undefined);
+    assert.equal(res.IECode, 1);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Numbers: extreme nesting fails fast and does not exhaust the stack', () => {
+  const hostile = '['.repeat(200000);
+  assert.throws(() => parseLosslessJson(hostile), SyntaxError);
+  assert.throws(() => parseLosslessJson('{"a":'.repeat(100000)), SyntaxError);
+});
+
+test('Numbers: a "__proto__" key is an ordinary own key and does not pollute Object.prototype', () => {
+  const obj = parseLosslessJson('{"__proto__":{"polluted":true},"constructor":{"prototype":{"x":1}}}');
+  assert.equal(Object.hasOwn(obj, '__proto__'), true);
+  assert.equal(Object.getPrototypeOf(obj), Object.prototype);
+  assert.equal(({}).polluted, undefined);
+  assert.equal(({}).x, undefined);
+  assert.equal(Object.prototype.polluted, undefined);
+});
+
+test('Numbers: duplicate keys keep the last value, as JSON.parse does', () => {
+  const text = '{"a":1,"b":2,"a":3,"a":{"c":9007199254740993}}';
+  assert.deepStrictEqual(parseLosslessJson(text), { a: { c: 9007199254740993n }, b: 2 });
+});
+
+test('Numbers: a 200k-number array parses in well under a second', () => {
+  // Built as text: 9007199254740993 + i would already be a double before stringifying.
+  const parts = [];
+  for (let i = 0; i < 200000; i++) {
+    parts.push(i % 4 === 0 ? `${9007199254740993n + BigInt(i)}` : i % 4 === 1 ? `${i}.5` : i % 4 === 2 ? `-${i}` : `${i}`);
+  }
+  const text = `[${parts.join(',')}]`;
+  const start = process.hrtime.bigint();
+  const out = parseLosslessJson(text);
+  const ms = Number(process.hrtime.bigint() - start) / 1e6;
+  assert.equal(out.length, 200000);
+  assert.equal(out[0], 9007199254740993n);
+  assert.ok(ms < 1000, `200k numbers took ${ms.toFixed(0)} ms`);
+});
+
+test('Numbers: ordinary payloads decode exactly as JSON.parse does', () => {
+  const corpus = [
+    '{"result":null,"error":null,"id":1}',
+    '{"result":{"blocks":830000,"chain":"main","bestblockhash":"00ab","difficulty":1.2e-3,"ok":true}}',
+    '{"result":[1,2,3,[4,[5,[6]]]],"error":null,"id":"x"}',
+    '{"result":{"a":"\\u00e9\\n\\t\\"\\\\\\/","b":"\\ud83d\\ude80","c":""}}',
+    '{"result":[-0,0,-1,1,0.5,-0.25,1e5,1E-5,123.456e7,9007199254740991,-9007199254740991]}',
+    '{"result":{"nested":{"deeper":{"deepest":[true,false,null,{}]}}}}',
+    '  \n\t{ "result" : [ ] , "error" : null }  \r\n',
+    '{"result":{"":1,"key with spaces":2,"__proto__x":3}}',
+    '{"result":"   raw"}',
+  ];
+  for (const text of corpus) {
+    assert.deepStrictEqual(parseLosslessJson(text), JSON.parse(text), text);
+  }
+});
+
+test('Numbers: random safe-valued payloads decode exactly as JSON.parse does', () => {
+  let seed = 0x2545f491;
+  const rnd = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
+  const randomValue = (depth) => {
+    const kind = Math.floor(rnd() * (depth > 3 ? 5 : 7));
+    switch (kind) {
+      case 0: return Math.floor(rnd() * 2 * Number.MAX_SAFE_INTEGER) - Number.MAX_SAFE_INTEGER;
+      case 1: return rnd() * 2000 - 1000;
+      case 2: return rnd() < 0.5;
+      case 3: return null;
+      case 4: return 'str-' + Math.floor(rnd() * 1e6);
+      case 5: return Array.from({ length: Math.floor(rnd() * 5) }, () => randomValue(depth + 1));
+      default: {
+        const o = {};
+        for (let i = 0; i < Math.floor(rnd() * 5); i++) o['k' + Math.floor(rnd() * 20)] = randomValue(depth + 1);
+        return o;
+      }
+    }
+  };
+  for (let i = 0; i < 300; i++) {
+    const text = JSON.stringify(randomValue(0));
+    assert.deepStrictEqual(parseLosslessJson(text), JSON.parse(text), text);
+  }
+});
+
+test('Numbers: inputs that JSON.parse rejects are rejected too', () => {
+  const invalid = [
+    '', ' ', '[', ']', '{', '}', '{"a"}', '{"a":}', '{1:2}', '[1 2]', 'tru', 'nul', 'True',
+    '"unterminated', '"bad\\x"', '"\\u12"', '"\\uZZZZ"', '"tab\there"', '"\u0001"', '01', '[01]', '1.e3', '1e+',
+  ];
+  for (const text of invalid) {
+    assert.throws(() => JSON.parse(text), SyntaxError, `JSON.parse should reject ${text}`);
+    assert.throws(() => parseLosslessJson(text), SyntaxError, text);
+  }
+});

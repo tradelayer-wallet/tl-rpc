@@ -4,6 +4,7 @@ import { constants as bufferConstants } from 'buffer';
 import { TextDecoder } from 'util';
 import { IComplex, IRpcClientOptions, IRpcResult, IRpcTlsOptions } from '../types/types';
 import { Complex } from './complex';
+import { parseLosslessJson } from './lossless-json';
 
 /**
  * The only `tls` keys the client forwards. The `satisfies` check makes this
@@ -150,18 +151,18 @@ export class RpcClient {
     return this._complex;
   }
 
-  async call(method: string, ...args: any[]): Promise<IRpcResult> {
+  async call<T = any>(method: string, ...args: any[]): Promise<IRpcResult<T>> {
     const { host, port, username, password, timeout, secure, tls, maxResponseBytes } = this.#options;
 
     // The promise must never reject: every failure path resolves { error }.
-    return new Promise((res) => {
+    return new Promise<IRpcResult<T>>((res) => {
       let request: http.ClientRequest | undefined;
       let requestJSON = '';
       let reqTimeOut: ReturnType<typeof setTimeout> | undefined;
       // Every terminal path funnels through here: the first settlement wins
       // and the timeout is always cleared with it.
       let settled = false;
-      const done = (result: IRpcResult) => {
+      const done = (result: IRpcResult<T>) => {
         if (settled) return;
         settled = true;
         if (reqTimeOut !== undefined) clearTimeout(reqTimeOut);
@@ -228,7 +229,7 @@ export class RpcClient {
         // Every early exit from the body goes through here. Settle first, then
         // destroy the socket: destroying can emit 'error' synchronously, which
         // must not overwrite the result chosen here.
-        const abort = (result: IRpcResult) => {
+        const abort = (result: IRpcResult<T>) => {
           chunks.length = 0;
           done(result);
           request?.destroy();
@@ -264,7 +265,9 @@ export class RpcClient {
             if (!isIdentityEncoding(response.headers['content-encoding'])) {
               throw new Error('Unsupported Content-Encoding');
             }
-            const decRes: unknown = JSON.parse(decodeBody(Buffer.concat(chunks)));
+            // The one JSON decode in the client. Numbers that a double would
+            // round come back as bigint or RpcDecimalString (see lossless-json.ts).
+            const decRes: unknown = parseLosslessJson(decodeBody(Buffer.concat(chunks)));
             // Own-property checks only, and a non-object envelope counts as
             // empty, so no response key (e.g. "hasOwnProperty") can break them.
             const envelope = typeof decRes === 'object' && decRes !== null ? (decRes as Record<string, unknown>) : {};
@@ -276,7 +279,7 @@ export class RpcClient {
                 EECode: rpcErrorCode(envelope.error),
               });
             }
-            if (Object.hasOwn(envelope, 'result')) return done({ data: envelope.result, statusCode });
+            if (Object.hasOwn(envelope, 'result')) return done({ data: envelope.result as T, statusCode });
             done({ error: 'Undefined Error', statusCode, IECode: 3, EECode: 0 });
           } catch (error: any) {
             statusCode !== 200

@@ -73,12 +73,6 @@ test();
   that is still compressed (a proxy ignored `identity`) fails with `Unsupported
   Content-Encoding`; it is never parsed as binary. A 401 is still reported as
   `Unauthorized`.
-- **Numbers:** responses are parsed with `JSON.parse`, so every number is an
-  IEEE-754 double. Integers above 2^53 (`9007199254740993` becomes
-  `9007199254740992`) and decimals with more than about 15 significant digits
-  are rounded silently. Do not use `data` for exact token or satoshi-level
-  amounts above that range without a lossless source (for example a string
-  field from the node).
 - **Port and credentials:** `port` must be an integer in 1..65535 (a numeric
   string is accepted). Any other value, including `0`, `NaN` and `null`, makes
   each call resolve `{ error: 'Invalid port: ...' }` without connecting; Node
@@ -94,6 +88,43 @@ test();
   port, resolves with `{ error }`. The constructor is the exception: it reads
   the options (and the `tls` allowlist) once, so a getter or Proxy trap on them
   that throws makes `new RpcClient(...)` throw.
+
+## Numbers
+
+Responses are decoded by the client's own JSON parser, which keeps every
+number exact. Nothing is rounded silently. Each JSON number becomes one of:
+
+| Source text | Result | Type |
+| --- | --- | --- |
+| an integer with |value| <= 2^53-1 (`-0` too) | `number` | `number` |
+| an integer outside that range (`9007199254740993`, `12345678901234567890`, `1e20`) | `bigint`, exact | `bigint` |
+| a decimal whose double denotes the same value (`0.1`, `1.50`, `1e-7`) | `number` | `number` |
+| a decimal a double would round (`0.10000000000000000001`, `1e-400`) | the original text | `RpcDecimalString` |
+
+- `RpcDecimalString` is a `string` at runtime. It is branded in the types so it
+  can be told apart from ordinary strings at compile time. Runtime cannot tell
+  them apart, so read the field's documented type to know which one to expect.
+- `RpcNumber` (`number | bigint | RpcDecimalString`) is exported for typing
+  numeric fields.
+- A `bigint` cannot be mixed with a `number` in arithmetic (`x + 1` throws a
+  `TypeError`), and `JSON.stringify` throws on one. Convert explicitly, for
+  example `Number(x)` where precision is no longer needed, or keep it as a
+  `bigint` for amounts.
+- Limits: an integer longer than 1024 digits, or nesting deeper than 128
+  levels, fails the call with `IECode: 1` (a parse error). The response
+  size cap (`maxResponseBytes`) applies to the body before it is parsed.
+- Grammar is strict RFC 8259 JSON, as with `JSON.parse`: leading zeros, a bare
+  `.5` or `1.`, `+1`, `NaN` and `Infinity` are rejected. Duplicate keys keep the
+  last value. A key named `__proto__` is an ordinary key and does not change
+  any prototype.
+- Typing: `call<T>()` returns `IRpcResult<T>`. The default `T` is `any`,
+  because the client does not know each method's result shape. Pass the shape
+  you expect, and use `RpcNumber` for numeric fields that can be large:
+
+```
+interface IBalance { amount: RpcNumber; symbol: string }
+const res = await client.call<IBalance>('getbalance', 'addr');
+```
 
 ## Changelog (unreleased)
 
@@ -130,6 +161,17 @@ test();
 - Fixed: `util.inspect(client)` no longer prints the password. The options are
   now an ES private field (`#options`), so they are not visible to
   `Object.keys`, `util.inspect` or `JSON`.
+- **Breaking:** response numbers are no longer always JavaScript numbers.
+  Integers outside the safe range come back as `bigint`, and decimals a double
+  would round come back as `RpcDecimalString` (their original text). Before,
+  `9007199254740993` silently became `9007199254740992`. Code that assumed
+  `typeof x === 'number'` or mixed these values with `number` arithmetic must
+  handle the new types (see Numbers).
+- **Behavior change:** JSON nesting deeper than 128 levels, and integers longer
+  than 1024 digits, fail with `IECode: 1`. Parse error texts now come from the
+  client's own parser, so they differ from `JSON.parse`'s wording.
+- **Typing:** `call<T>()` returns `IRpcResult<T>` (default `any`). New exported
+  types: `RpcNumber`, `RpcDecimalString`.
 - **Behavior change:** the `tls` allowlist is copied when the client is
   constructed. Later changes to the `tls` object do not affect calls.
 - Fixed: a JSON-RPC error that is a string, or an object without a message,

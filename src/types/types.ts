@@ -102,9 +102,30 @@ export interface IRpcClientOptions {
   maxResponseBytes?: number;
 }
 
-export interface IRpcResult {
+/**
+ * A JSON number whose value a JS `number` cannot hold exactly: the original
+ * token text, verbatim (e.g. `"0.10000000000000000001"`). Typed as a string
+ * subtype, so it is safe to print, compare or pass to a decimal library.
+ * The brand is compile-time only; at runtime it is an ordinary string.
+ */
+export type RpcDecimalString = string & { readonly __rpcDecimal: 'RpcDecimalString' };
+
+/**
+ * Every shape a JSON number can take in a response (see the README "Numbers"
+ * section): a `number` for safe integers and for decimals that round-trip,
+ * a `bigint` for integers outside the safe range, and an `RpcDecimalString`
+ * for decimals that a `number` would round.
+ */
+export type RpcNumber = number | bigint | RpcDecimalString;
+
+export interface IRpcResult<T = any> {
   error?: string;
-  data?: any;
+  /**
+   * The JSON-RPC `result`. The client does not know the shape of each method's
+   * result, so the default is `any`; pass a type argument to `call<T>()` to
+   * describe it. Numeric fields may hold an {@link RpcNumber}.
+   */
+  data?: T;
   statusCode?: number;
   IECode?: number;
   EECode?: number;
