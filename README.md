@@ -110,9 +110,20 @@ number exact. Nothing is rounded silently. Each JSON number becomes one of:
   `TypeError`), and `JSON.stringify` throws on one. Convert explicitly, for
   example `Number(x)` where precision is no longer needed, or keep it as a
   `bigint` for amounts.
+- `JSON.stringify(res)` on a result that holds a bigint throws `TypeError:
+  Do not know how to serialize a BigInt`. To log or store a result, use a
+  replacer: `JSON.stringify(res, (_, v) => (typeof v === 'bigint' ? v.toString() : v))`.
+- Sending values back: `call()` serializes its parameters with `JSON.stringify`.
+  A `bigint` parameter fails the call with `{ error: 'Do not know how to
+  serialize a BigInt' }` and nothing is sent. A `RpcDecimalString` is sent as a
+  JSON string, not a number. Convert a value to what the node's method
+  accepts before passing it on.
 - Limits: an integer longer than 1024 digits, or nesting deeper than 128
   levels, fails the call with `IECode: 1` (a parse error). The response
   size cap (`maxResponseBytes`) applies to the body before it is parsed.
+  The parser is slower than `JSON.parse` (about 3 to 11 times on large
+  bodies); the cap bounds how long one response can take to parse, so raise
+  `maxResponseBytes` with that in mind.
 - Grammar is strict RFC 8259 JSON, as with `JSON.parse`: leading zeros, a bare
   `.5` or `1.`, `+1`, `NaN` and `Infinity` are rejected. Duplicate keys keep the
   last value. A key named `__proto__` is an ordinary key and does not change
@@ -171,7 +182,12 @@ const res = await client.call<IBalance>('getbalance', 'addr');
   than 1024 digits, fail with `IECode: 1`. Parse error texts now come from the
   client's own parser, so they differ from `JSON.parse`'s wording.
 - **Typing:** `call<T>()` returns `IRpcResult<T>` (default `any`). New exported
-  types: `RpcNumber`, `RpcDecimalString`.
+  types: `RpcNumber`, `RpcDecimalString`. The `T` is not checked against the
+  response: a numeric field typed `number` can still hold a `bigint` or a
+  string, so type such fields as `RpcNumber`.
+- **Fixed:** an error code above 2^53 is reported in `EECode` (as a number, as
+  before). `complex.bestBlock()` fails when the height is not a `number`
+  instead of returning a `bigint` typed as one.
 - **Behavior change:** the `tls` allowlist is copied when the client is
   constructed. Later changes to the `tls` object do not affect calls.
 - Fixed: a JSON-RPC error that is a string, or an object without a message,
