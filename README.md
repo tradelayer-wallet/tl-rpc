@@ -152,9 +152,11 @@ const res = await client.call<IBalance>('getbalance', 'addr');
 - **Behavior change:** responses over `maxResponseBytes` (default 32 MiB) now
   fail with `E2BIG`. Previously they were buffered without limit.
 - New `maxResponseBytes` option (default 32 MiB).
-- Fixed: a numeric string given as `timeout` or `maxResponseBytes` (for example from an
-  environment variable) was silently replaced by the default. It is now read as a
-  number, as `port` already was.
+- Fixed: a numeric string given as `timeout` or `maxResponseBytes` (for example
+  from an environment variable) was silently replaced by the default. It is now
+  read as a number, as `port` already was.
+- Fixed: `complex.bestBlock()` rejected a height of 0 (the genesis block) as if
+  it were missing.
 - `timeout` and `maxResponseBytes` are normalized in the constructor:
   non-finite or sub-1 values fall back to the default, and values are capped
   at 2^31-1. A `timeout` of `undefined`, `0` or `Infinity` previously fired
