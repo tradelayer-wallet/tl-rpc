@@ -276,9 +276,7 @@ class Parser {
       this.i = i;
       this.fail('Invalid number');
     }
-    let plain = true;
     if (s.charCodeAt(i) === 0x2e) {
-      plain = false;
       i++;
       if (!isDigit(s.charCodeAt(i))) {
         this.i = i;
@@ -288,7 +286,6 @@ class Parser {
     }
     const e = s.charCodeAt(i);
     if (e === 0x65 || e === 0x45) {
-      plain = false;
       i++;
       const sign = s.charCodeAt(i);
       if (sign === 0x2b || sign === 0x2d) i++;
@@ -299,10 +296,7 @@ class Parser {
       while (isDigit(s.charCodeAt(i))) i++;
     }
     this.i = i;
-    const token = s.slice(start, i);
-    // Fast path: a short plain integer is always a safe integer (sign included in the length).
-    if (plain && token.length <= ALWAYS_SAFE_DIGITS) return Number(token);
-    return this.classify(token);
+    return this.classify(s.slice(start, i));
   }
 
   private classify(token: string): number | bigint | RpcDecimalString {
@@ -318,7 +312,6 @@ class Parser {
       if (mag >= MIN_NORMAL_DOUBLE && mag < Infinity && (!Number.isInteger(d) || mag <= Number.MAX_SAFE_INTEGER)) return d;
     }
     const c = canonicalize(token);
-    if (c.digits === '') return Number(token); // zero, possibly -0
     if (c.point >= c.digits.length) {
       // An integer value: exact digits are c.digits followed by zeros.
       if (c.point > MAX_INTEGER_DIGITS) this.fail(`Integer longer than ${MAX_INTEGER_DIGITS} digits`);
