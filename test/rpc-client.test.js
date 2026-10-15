@@ -876,3 +876,120 @@ test('Numbers: a bigint request param fails the call with an error and sends not
     await srv.close();
   }
 });
+
+// --- Round 11: characterization of the request path -------------------------
+// These pin the outcome of every failure path so the shared request, error and
+// cleanup code can be collapsed without changing what a caller sees.
+const closedPort = async () => {
+  const s = net.createServer();
+  await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const port = s.address().port;
+  await new Promise((r) => s.close(r));
+  return port;
+};
+
+test('R11: a refused connection resolves an error with no IECode or statusCode', async () => {
+  const res = await new RpcClient({ host: '127.0.0.1', port: await closedPort(), timeout: 2000 }).call('x');
+  assert.match(res.error ?? '', /ECONNREFUSED/);
+  assert.equal(res.data, undefined);
+  assert.equal(res.IECode, undefined);
+  assert.equal(res.statusCode, undefined);
+});
+
+test('R11: an HTTP 500 with a non-JSON body keeps its status and no IECode', async () => {
+  const srv = await rawBodyServer({ status: 500, body: Buffer.from('<html>oops</html>') });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
+    assert.equal(res.statusCode, 500);
+    assert.ok(res.error, JSON.stringify(res));
+    assert.equal(res.IECode, undefined);
+    assert.equal(res.data, undefined);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('R11: an HTTP 200 with a non-JSON body is IECode 1 with its status', async () => {
+  const srv = await rawBodyServer({ body: Buffer.from('not json') });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
+    assert.ok(res.error, JSON.stringify(res));
+    assert.deepEqual(Object.keys(res).sort(), ['IECode', 'error', 'statusCode']);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.IECode, 1);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('R11: a 200 envelope with neither result nor error is IECode 3 with EECode 0', async () => {
+  const srv = await rawBodyServer({ body: Buffer.from('{"error":null,"id":1}') });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
+    assert.deepEqual(res, { error: 'Undefined Error', statusCode: 200, IECode: 3, EECode: 0 });
+  } finally {
+    await srv.close();
+  }
+});
+
+test('R11: a 500 JSON-RPC error keeps statusCode, IECode 2 and the numeric code', async () => {
+  const srv = await rawBodyServer({
+    status: 500,
+    body: Buffer.from('{"result":null,"error":{"code":-8,"message":"bad param"},"id":1}'),
+  });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
+    assert.deepEqual(res, { error: 'bad param', statusCode: 500, IECode: 2, EECode: -8 });
+  } finally {
+    await srv.close();
+  }
+});
+
+// A body that stops mid-way: the socket closes, so the call resolves ECONNRESET.
+test('R11: a connection that closes mid-body resolves ECONNRESET', async () => {
+  const srv = await rawServer((socket) => {
+    socket.write('HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{"result":"abc');
+    setTimeout(() => socket.destroy(), 50);
+  });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 3000 }).call('x');
+    assert.deepEqual(res, { error: 'ECONNRESET' });
+  } finally {
+    await srv.close();
+  }
+});
+
+// A body that stalls mid-way: the timeout resolves ETIMEDOUT and closes the socket.
+test('R11: a stall mid-body resolves ETIMEDOUT and closes the socket', async () => {
+  let closed = false;
+  const srv = await rawServer((socket) => {
+    socket.on('close', () => { closed = true; });
+    socket.write('HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{"result":"abc');
+  });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 200 }).call('x');
+    assert.deepEqual(res, { error: 'ETIMEDOUT' });
+    await sleep(50);
+    assert.equal(closed, true, 'the timed-out socket was left open');
+  } finally {
+    await srv.close();
+  }
+});
+
+// The tls allowlist applies only to HTTPS: a plain-HTTP call never receives it.
+test('R11: tls options are not passed to http.request when secure is false', async () => {
+  const seen = [];
+  const realRequest = http.request;
+  http.request = (opts) => {
+    seen.push(opts);
+    throw new Error('spy: not dialed');
+  };
+  try {
+    await new RpcClient({ host: '127.0.0.1', port: 9, timeout: 1000, tls: { ca: 'CA', servername: 'x' } }).call('x');
+  } finally {
+    http.request = realRequest;
+  }
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].ca, undefined);
+  assert.equal(seen[0].servername, undefined);
+});
