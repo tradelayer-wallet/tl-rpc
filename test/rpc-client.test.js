@@ -993,3 +993,14 @@ test('R11: tls options are not passed to http.request when secure is false', asy
   assert.equal(seen[0].ca, undefined);
   assert.equal(seen[0].servername, undefined);
 });
+
+// A height of 0 is the genesis block on a fresh chain, an honest answer.
+test('R11: bestBlock returns height 0 (genesis) as a number', async () => {
+  const srv = await heightServer('0');
+  try {
+    const bb = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).complex.bestBlock();
+    assert.deepEqual(bb, { data: 0 });
+  } finally {
+    await srv.close();
+  }
+});
