@@ -92,8 +92,12 @@ const isIdentityEncoding = (value: string | undefined): boolean => {
   return coding === '' || coding === 'identity';
 };
 
-/** JSON-RPC error text: a string, or an object's non-empty `message`. Never empty, so a failure cannot read as success. */
-const rpcErrorMessage = (err: unknown): string => {
+/**
+ * Text for any error: a string, or an object's non-empty `message`. Used for
+ * JSON-RPC errors and for every failure the client itself reports. Never
+ * empty, so a failure cannot read as success.
+ */
+const errorText = (err: unknown): string => {
   const message = typeof err === 'string' ? err : (err as { message?: unknown } | null)?.message;
   return typeof message === 'string' && message !== '' ? message : 'Undefined Error';
 };
@@ -156,35 +160,35 @@ export class RpcClient {
   async call<T = any>(method: string, ...args: any[]): Promise<IRpcResult<T>> {
     const { host, port, username, password, timeout, secure, tls, maxResponseBytes } = this.#options;
 
-    // The promise must never reject: every failure path resolves { error }.
+    // The promise must never reject: every outcome, failures included, resolves through `done`.
     return new Promise<IRpcResult<T>>((res) => {
       let request: http.ClientRequest | undefined;
-      let requestJSON = '';
-      let reqTimeOut: ReturnType<typeof setTimeout> | undefined;
-      // Every terminal path funnels through here: the first settlement wins
-      // and the timeout is always cleared with it.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let chunks: Buffer[] = [];
       let settled = false;
+      // The one exit for every outcome: the first one wins, and it clears the
+      // timer, releases the buffered body and closes the socket. Settling
+      // before the destroy matters: destroying can emit 'error', which must
+      // not replace the outcome chosen here.
       const done = (result: IRpcResult<T>) => {
         if (settled) return;
         settled = true;
-        if (reqTimeOut !== undefined) clearTimeout(reqTimeOut);
+        clearTimeout(timer);
+        chunks = [];
         res(result);
+        request?.destroy();
       };
 
+      let requestJSON = '';
       try {
-        const requestObj = {
-          id: this._nextRequestId++,
-          method: method,
-          params: args,
-        };
-        // JSON.stringify throws on circular params — resolve, don't reject.
-        requestJSON = JSON.stringify(requestObj);
+        // JSON.stringify throws on circular or BigInt params; that resolves too.
+        requestJSON = JSON.stringify({ id: this._nextRequestId++, method, params: args });
         if (!isValidPort(port)) throw new RangeError(`Invalid port: ${String(port)}`);
         const requestOptions: https.RequestOptions = {
-          // `tls` is the allowlisted copy made at construction. The client-owned
-          // fields below come after it, so they could not be overridden even if
-          // the allowlist grew.
-          ...(secure ? tls : undefined),
+          // `tls` is the allowlisted copy made at construction (undefined unless
+          // `secure`). The client-owned fields below come after it, so they
+          // could not be overridden even if the allowlist grew.
+          ...tls,
           host: host,
           port: port,
           method: 'POST',
@@ -201,53 +205,33 @@ export class RpcClient {
           agent: false,
           auth: username + ':' + password,
         };
-        // Construction throws on e.g. an out-of-range port — resolve, don't reject.
-        request = secure
-          ? https.request(requestOptions)
-          : http.request(requestOptions);
-      } catch (error: any) {
-        return done({ error: error.message });
+        request = secure ? https.request(requestOptions) : http.request(requestOptions);
+      } catch (error) {
+        return done({ error: errorText(error) });
       }
 
       // Armed before any I/O and kept armed until the response body has
       // completed: headers arriving is not the end of the exchange, and a
       // server that stalls mid-body must not hold the call open (and its
       // socket) forever.
-      reqTimeOut = setTimeout(() => {
-        done({ error: 'ETIMEDOUT' });
-        request?.destroy();
-      }, timeout);
+      timer = setTimeout(() => done({ error: 'ETIMEDOUT' }), timeout);
 
-      request.on('error', (error: any) => {
-        request?.destroy();
-        done({ error: error.message });
-      });
+      request.on('error', (error) => done({ error: errorText(error) }));
       request.on('response', (response: http.IncomingMessage) => {
         // Collect raw bytes and decode once, after the full body has arrived.
         // Decoding each chunk as it comes (`buffer += chunk`) corrupts a UTF-8
         // sequence split across TCP segments: each half becomes U+FFFD.
-        const chunks: Buffer[] = [];
         let receivedBytes = 0;
-        // Every early exit from the body goes through here. Settle first, then
-        // destroy the socket: destroying can emit 'error' synchronously, which
-        // must not overwrite the result chosen here.
-        const abort = (result: IRpcResult<T>) => {
-          chunks.length = 0;
-          done(result);
-          request?.destroy();
-        };
         // The cap is enforced while streaming: the socket is destroyed as soon
         // as the limit is crossed, so an oversized body is never buffered whole.
         response.on('data', (chunk: Buffer) => {
           receivedBytes += chunk.length;
-          if (receivedBytes > maxResponseBytes) return abort({ error: 'E2BIG' });
+          if (receivedBytes > maxResponseBytes) return done({ error: 'E2BIG' });
           chunks.push(chunk);
         });
         // A connection that dies mid-body never emits 'end'; without these the
-        // promise would stay pending forever. Resolve ECONNRESET and free the
-        // socket instead of deadlocking.
-        const bodyBroken = () => abort({ error: 'ECONNRESET' });
-        response.on('aborted', bodyBroken);
+        // promise would stay pending forever. Resolve ECONNRESET instead.
+        const bodyBroken = () => done({ error: 'ECONNRESET' });
         response.on('error', bodyBroken);
         response.on('close', () => {
           if (!response.complete) bodyBroken();
@@ -255,13 +239,13 @@ export class RpcClient {
         // A declared Content-Length over the cap is refused before any byte is read.
         const declaredBytes = Number(response.headers['content-length']);
         if (Number.isFinite(declaredBytes) && declaredBytes > maxResponseBytes) {
-          return abort({ error: 'E2BIG' });
+          return done({ error: 'E2BIG' });
         }
         response.on('end', () => {
           const { statusCode } = response;
+          if (statusCode === 401) return done({ error: 'Unauthorized', statusCode, IECode: 4 });
+          // if (statusCode !== 200) return done({ error: 'Undefined Error', statusCode, IECode: 5 })
           try {
-            if (statusCode === 401) return done({ error: 'Unauthorized', statusCode, IECode: 4 });
-            // if (statusCode !== 200) return done({ error: 'Undefined Error', statusCode, IECode: 5 })
             // A server or proxy that compresses despite `identity` is reported
             // as such, not parsed as binary garbage.
             if (!isIdentityEncoding(response.headers['content-encoding'])) {
@@ -275,7 +259,7 @@ export class RpcClient {
             const envelope = typeof decRes === 'object' && decRes !== null ? (decRes as Record<string, unknown>) : {};
             if (Object.hasOwn(envelope, 'error') && envelope.error !== null) {
               return done({
-                error: rpcErrorMessage(envelope.error),
+                error: errorText(envelope.error),
                 statusCode,
                 IECode: 2,
                 EECode: rpcErrorCode(envelope.error),
@@ -283,19 +267,19 @@ export class RpcClient {
             }
             if (Object.hasOwn(envelope, 'result')) return done({ data: envelope.result as T, statusCode });
             done({ error: 'Undefined Error', statusCode, IECode: 3, EECode: 0 });
-          } catch (error: any) {
-            statusCode !== 200
-              ? done({ error: error.message, statusCode })
-              : done({ error: error.message, statusCode, IECode: 1 });
+          } catch (error) {
+            // IECode 1 marks a body that did not decode from a node that answered 200.
+            done(statusCode !== 200
+              ? { error: errorText(error), statusCode }
+              : { error: errorText(error), statusCode, IECode: 1 });
           }
         });
       });
 
       try {
         request.end(requestJSON);
-      } catch (error: any) {
-        request.destroy();
-        done({ error: error.message });
+      } catch (error) {
+        done({ error: errorText(error) });
       }
     });
   }
