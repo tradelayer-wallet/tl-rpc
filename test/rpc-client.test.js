@@ -1004,3 +1004,39 @@ test('R11: bestBlock returns height 0 (genesis) as a number', async () => {
     await srv.close();
   }
 });
+
+// --- Round 11: numeric options given as strings ----------------------------
+// port already accepts a numeric string (an environment variable). timeout and
+// maxResponseBytes must read it the same way; before the fix the string was
+// dropped and the default (3000 ms, 32 MiB) was used without any signal.
+test('R11: a numeric-string timeout is honored, not replaced by the 3000 ms default', async () => {
+  const srv = await rawServer(() => {});
+  try {
+    const started = Date.now();
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: '200' }).call('x');
+    assert.deepEqual(res, { error: 'ETIMEDOUT' });
+    assert.ok(Date.now() - started < 2000, `timed out after ${Date.now() - started} ms`);
+  } finally {
+    await srv.close();
+  }
+});
+
+test('R11: a numeric-string maxResponseBytes is honored', async () => {
+  const srv = await rawBodyServer({ body: Buffer.from(`{"result":"${'q'.repeat(4096)}","error":null}`) });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000, maxResponseBytes: '1024' }).call('x');
+    assert.deepEqual(res, { error: 'E2BIG' });
+  } finally {
+    await srv.close();
+  }
+});
+
+test('R11: a non-numeric string timeout still falls back to the default', async () => {
+  const srv = await rawBodyServer({ body: Buffer.from('{"result":"ok","error":null}') });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: '5s' }).call('x');
+    assert.equal(res.data, 'ok', JSON.stringify(res));
+  } finally {
+    await srv.close();
+  }
+});

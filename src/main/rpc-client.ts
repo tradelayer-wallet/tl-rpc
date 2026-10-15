@@ -64,8 +64,8 @@ const resolveCount = (value: unknown, fallback: number, max: number): number => 
   return n >= 1 ? n : fallback;
 };
 
-/** Numeric strings (e.g. from an environment variable) are accepted as ports. */
-const normalizePort = (value: unknown): unknown =>
+/** Numeric strings (e.g. from an environment variable) are read as numbers, for every numeric option. */
+const asNumber = (value: unknown): unknown =>
   typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
 
 /**
@@ -130,9 +130,9 @@ const normalizeOptions = (input: IRpcClientOptions): ResolvedOptions => {
   const merged: IRpcClientOptions = { ...DEFAULT_OPTIONS, ...given };
   return {
     ...merged,
-    port: normalizePort(merged.port),
-    timeout: resolveCount(merged.timeout, DEFAULT_TIMEOUT_MS, MAX_INT32),
-    maxResponseBytes: resolveCount(merged.maxResponseBytes, DEFAULT_MAX_RESPONSE_BYTES, MAX_BODY_BYTES),
+    port: asNumber(merged.port),
+    timeout: resolveCount(asNumber(merged.timeout), DEFAULT_TIMEOUT_MS, MAX_INT32),
+    maxResponseBytes: resolveCount(asNumber(merged.maxResponseBytes), DEFAULT_MAX_RESPONSE_BYTES, MAX_BODY_BYTES),
     tls: merged.secure ? pickTlsOptions(merged.tls) : undefined,
   };
 };

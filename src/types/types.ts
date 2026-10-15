@@ -66,7 +66,8 @@ export interface IRpcClientOptions {
    * sends headers and then stalls can no longer hold the call open forever.
    * Non-finite values and values below 1 ms fall back to the default (3000
    * ms); fractions are rounded down; values above 2^31-1 are capped there,
-   * because `setTimeout` fires immediately on a larger delay.
+   * because `setTimeout` fires immediately on a larger delay. Untyped callers
+   * may pass a numeric string (e.g. from an environment variable), read as a number.
    */
   timeout: number;
   /**
@@ -97,7 +98,7 @@ export interface IRpcClientOptions {
    * resolves `{ error: 'E2BIG' }`. Non-finite values and values below 1 fall
    * back to the default; fractions are rounded down; values above 2^31-1 are
    * capped there, and at Node's maximum string length (which bounds the
-   * decode).
+   * decode). Untyped callers may pass a numeric string, read as a number.
    */
   maxResponseBytes?: number;
 }
