@@ -179,10 +179,12 @@ export class RpcClient {
         request?.destroy();
       };
 
+      let requestId = 0;
       let requestJSON = '';
       try {
         // JSON.stringify throws on circular or BigInt params; that resolves too.
-        requestJSON = JSON.stringify({ id: this._nextRequestId++, method, params: args });
+        requestId = this._nextRequestId++;
+        requestJSON = JSON.stringify({ id: requestId, method, params: args });
         if (!isValidPort(port)) throw new RangeError(`Invalid port: ${String(port)}`);
         const requestOptions: https.RequestOptions = {
           // `tls` is the allowlisted copy made at construction (undefined unless
@@ -244,7 +246,6 @@ export class RpcClient {
         response.on('end', () => {
           const { statusCode } = response;
           if (statusCode === 401) return done({ error: 'Unauthorized', statusCode, IECode: 4 });
-          // if (statusCode !== 200) return done({ error: 'Undefined Error', statusCode, IECode: 5 })
           try {
             // A server or proxy that compresses despite `identity` is reported
             // as such, not parsed as binary garbage.
@@ -265,12 +266,15 @@ export class RpcClient {
                 EECode: rpcErrorCode(envelope.error),
               });
             }
-            if (Object.hasOwn(envelope, 'result')) return done({ data: envelope.result as T, statusCode });
-            done({ error: 'Undefined Error', statusCode, IECode: 3, EECode: 0 });
+            // Only HTTP 200 is a result. Any other status is a failure, whatever the body says.
+            if (statusCode !== 200) return done({ error: `HTTP ${statusCode}`, statusCode });
+            if (!Object.hasOwn(envelope, 'result')) return done({ error: 'Undefined Error', statusCode, IECode: 3, EECode: 0 });
+            if (envelope.id !== requestId) return done({ error: 'Response id does not match the request', statusCode, IECode: 3 });
+            done({ data: envelope.result as T, statusCode });
           } catch (error) {
             // IECode 1 marks a body that did not decode from a node that answered 200.
             done(statusCode !== 200
-              ? { error: errorText(error), statusCode }
+              ? { error: `HTTP ${statusCode}`, statusCode }
               : { error: errorText(error), statusCode, IECode: 1 });
           }
         });

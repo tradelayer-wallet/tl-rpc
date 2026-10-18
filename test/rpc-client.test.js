@@ -409,7 +409,7 @@ test('R3: the client does not expose the password through util.inspect or Object
 test('R3: undefined username/password keep the defaults (no "undefined:" credential)', async () => {
   let auth = null;
   const srv = await rawBodyServer({
-    body: Buffer.from('{"result":"ok","error":null}'),
+    body: Buffer.from('{"result":"ok","error":null,"id":1}'),
     onRequest: (req) => (auth = /^authorization: (.*)$/im.exec(req.head)[1]),
   });
   try {
@@ -503,7 +503,7 @@ test('R3: a JSON-RPC error without a usable message never reads as success', asy
 // non-object envelope is an undefined response, not a TypeError.
 test('R3: envelope keys cannot shadow the own-property checks', async () => {
   const bodies = [
-    ['{"hasOwnProperty":1,"result":5,"error":null}', { data: 5 }],
+    ['{"hasOwnProperty":1,"result":5,"error":null,"id":1}', { data: 5 }],
     ['null', { error: 'Undefined Error', IECode: 3, EECode: 0 }],
   ];
   for (const [text, expected] of bodies) {
@@ -524,7 +524,7 @@ test('R3: envelope keys cannot shadow the own-property checks', async () => {
 // R3 encoding: a body that arrives UTF-8 BOM-prefixed decodes as its JSON text
 // (the BOM is dropped, as a WHATWG decoder does), rather than failing to parse.
 test('R3: a leading UTF-8 BOM is dropped and the JSON parses', async () => {
-  const srv = await rawBodyServer({ body: Buffer.from('﻿{"result":1,"error":null}', 'utf8') });
+  const srv = await rawBodyServer({ body: Buffer.from('﻿{"result":1,"error":null,"id":1}', 'utf8') });
   try {
     const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('x');
     assert.equal(res.data, 1, JSON.stringify(res));
@@ -828,10 +828,10 @@ test('Numbers: a bigint error.code keeps its numeric value in EECode, as JSON.pa
 // A two-call node: getbestblockhash, then getblock returning `heightJson`.
 const heightServer = (heightJson) =>
   rawServer((socket, req) => {
-    const { method } = JSON.parse(req.body);
+    const { id, method } = JSON.parse(req.body);
     const payload = method === 'getbestblockhash'
-      ? '{"result":"00ab","error":null,"id":1}'
-      : `{"result":{"height":${heightJson}},"error":null,"id":1}`;
+      ? `{"result":"00ab","error":null,"id":${id}}`
+      : `{"result":{"height":${heightJson}},"error":null,"id":${id}}`;
     const body = Buffer.from(payload, 'utf8');
     socket.end(Buffer.concat([
       Buffer.from(`HTTP/1.1 200 X\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`, 'latin1'),
@@ -945,6 +945,63 @@ test('R11: a 500 JSON-RPC error keeps statusCode, IECode 2 and the numeric code'
   }
 });
 
+// R3: a result is a success only with HTTP 200. A proxy's 503 with a JSON result is a failure.
+test('R3: a non-200 response with a JSON result is not success', async () => {
+  const srv = await rawBodyServer({
+    status: 503,
+    body: Buffer.from('{"result":{"balance":1},"error":null,"id":1}'),
+  });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('getbalance');
+    assert.deepEqual(res, { error: 'HTTP 503', statusCode: 503 });
+  } finally {
+    await srv.close();
+  }
+});
+
+// R3: a non-200 response that carries a JSON-RPC error still reports that error and its code.
+test('R3: a non-200 JSON-RPC error is reported with its status and code', async () => {
+  const srv = await rawBodyServer({
+    status: 503,
+    body: Buffer.from('{"result":null,"error":{"code":-28,"message":"Loading block index"},"id":1}'),
+  });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('getbalance');
+    assert.deepEqual(res, { error: 'Loading block index', statusCode: 503, IECode: 2, EECode: -28 });
+  } finally {
+    await srv.close();
+  }
+});
+
+// R4: a result is returned only for the request that produced it.
+test('R4: a result whose id is not the request id is not returned', async () => {
+  const srv = await rawBodyServer({ body: Buffer.from('{"result":"someone else","error":null,"id":7}') });
+  try {
+    const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 }).call('getbalance');
+    assert.equal(res.data, undefined, JSON.stringify(res));
+    assert.equal(res.IECode, 3);
+    assert.equal(res.statusCode, 200);
+  } finally {
+    await srv.close();
+  }
+});
+
+// R4: a server that echoes each request's id gets every result back on the call that sent it.
+test('R4: two calls on one client each receive the result for their own id', async () => {
+  const srv = await rawServer((socket, req) => {
+    const { id, params } = JSON.parse(req.body);
+    const response = jsonResponse(200, { result: params[0], error: null, id });
+    socket.end(Buffer.concat([Buffer.from(response.head, 'latin1'), response.body]));
+  });
+  try {
+    const client = new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: 5000 });
+    assert.equal((await client.call('echo', 'first')).data, 'first');
+    assert.equal((await client.call('echo', 'second')).data, 'second');
+  } finally {
+    await srv.close();
+  }
+});
+
 // A body that stops mid-way: the socket closes, so the call resolves ECONNRESET.
 test('R11: a connection that closes mid-body resolves ECONNRESET', async () => {
   const srv = await rawServer((socket) => {
@@ -1032,7 +1089,7 @@ test('R11: a numeric-string maxResponseBytes is honored', async () => {
 });
 
 test('R11: a non-numeric string timeout still falls back to the default', async () => {
-  const srv = await rawBodyServer({ body: Buffer.from('{"result":"ok","error":null}') });
+  const srv = await rawBodyServer({ body: Buffer.from('{"result":"ok","error":null,"id":1}') });
   try {
     const res = await new RpcClient({ host: '127.0.0.1', port: srv.port, timeout: '5s' }).call('x');
     assert.equal(res.data, 'ok', JSON.stringify(res));

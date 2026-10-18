@@ -202,6 +202,13 @@ const res = await client.call<IBalance>('getbalance', 'addr');
   `hasOwnProperty`) made the envelope check throw and discard a valid result.
   A top-level JSON value that is not an object (such as `null`) now resolves
   `Undefined Error` (IECode 3), not a TypeError message.
+- **Behavior change:** only an HTTP 200 response can return `data`. Any other
+  status fails with `HTTP <status>` (and `statusCode`), even when the body is a
+  JSON `result`. A JSON-RPC `error` in the body is still reported with its
+  status and `IECode: 2`.
+- **Behavior change:** a result is returned only when the response `id` equals
+  the request `id`. A mismatch fails with `Response id does not match the
+  request` (IECode 3).
 - Requests send `Accept-Encoding: identity`.
 - `IRpcTlsOptions` is exported from the package.
 - Build: `@types/node` is now `^22.20.5` (it was `^17.0.21`, which does not
