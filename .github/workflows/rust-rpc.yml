@@ -1,0 +1,32 @@
+name: Rust RPC foundation
+on:
+  pull_request:
+    paths: ['rust/**', '.github/workflows/rust-rpc.yml']
+  push:
+    branches: [master]
+    paths: ['rust/**', '.github/workflows/rust-rpc.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+      - name: Unit and mock tests
+        working-directory: rust/tl-rpc-client
+        run: cargo test --locked --offline
+      - name: Source-derived wire parity
+        working-directory: rust/tl-rpc-client
+        run: node scripts/verify-wire.cjs
+      - name: Clippy
+        working-directory: rust/tl-rpc-client
+        run: cargo clippy --locked --offline --all-targets -- -D warnings
+      - name: Format
+        working-directory: rust/tl-rpc-client
+        run: cargo fmt --all -- --check
