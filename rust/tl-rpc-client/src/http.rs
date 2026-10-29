@@ -41,6 +41,10 @@ impl HttpTransport {
             .pool_max_idle_per_host(0).connect_timeout(Duration::from_secs(10));
         if let Some(pem) = ca_pem {
             if url.scheme() != "https" { return Err(Error::InvalidRequest); }
+            let pem_text = std::str::from_utf8(pem).map_err(|_| Error::InvalidRequest)?;
+            if !pem_text.contains("-----BEGIN CERTIFICATE-----") || !pem_text.contains("-----END CERTIFICATE-----") {
+                return Err(Error::InvalidRequest);
+            }
             let cert = reqwest::Certificate::from_pem(pem).map_err(|_| Error::InvalidRequest)?;
             builder = builder.add_root_certificate(cert);
         }

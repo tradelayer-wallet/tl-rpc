@@ -18,24 +18,31 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
-      - name: Resolve first transport lockfile
+      - name: Fetch pinned crates
+        working-directory: rust/tl-rpc-client
+        run: cargo fetch --locked
+      - name: Format sources for review
         working-directory: rust/tl-rpc-client
         run: |
-          cargo generate-lockfile
-          cargo fetch
-          echo "LOCKFILE_BEGIN"
-          base64 -w0 Cargo.lock
-          echo
-          echo "LOCKFILE_END"
-      - name: Unit, integration and mock tests
+          cargo fmt --all
+          for file in src/lib.rs src/http.rs tests/transport.rs examples/tls_probe.rs; do
+            echo "FORMAT_BEGIN $file"
+            base64 -w0 "$file"
+            echo
+            echo "FORMAT_END $file"
+          done
+      - name: Unit and integration tests
         working-directory: rust/tl-rpc-client
-        run: cargo test --offline
+        run: cargo test --locked --offline
+      - name: Synthetic TLS trust test
+        working-directory: rust/tl-rpc-client
+        run: python3 scripts/test-tls.py
       - name: Source-derived wire parity
         working-directory: rust/tl-rpc-client
         run: node scripts/verify-wire.cjs
       - name: Clippy
         working-directory: rust/tl-rpc-client
-        run: cargo clippy --offline --all-targets -- -D warnings
+        run: cargo clippy --locked --offline --all-targets -- -D warnings
       - name: Format
         working-directory: rust/tl-rpc-client
         run: cargo fmt --all -- --check
