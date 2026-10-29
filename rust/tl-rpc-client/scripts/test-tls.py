@@ -23,23 +23,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 with tempfile.TemporaryDirectory(prefix="tl-rpc-test-tls-") as directory:
-    cert = Path(directory) / "cert.pem"
-    key = Path(directory) / "key.pem"
+    ca_cert = Path(directory) / "ca.pem"
+    ca_key = Path(directory) / "ca.key"
+    leaf_cert = Path(directory) / "leaf.pem"
+    leaf_key = Path(directory) / "leaf.key"
+    csr = Path(directory) / "leaf.csr"
+    extensions = Path(directory) / "server.ext"
+    extensions.write_text(
+        "subjectAltName=DNS:localhost,IP:127.0.0.1\n"
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature,keyEncipherment\n"
+        "extendedKeyUsage=serverAuth\n"
+    )
     subprocess.run([
         "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-        "-keyout", str(key), "-out", str(cert), "-days", "1",
-        "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+        "-keyout", str(ca_key), "-out", str(ca_cert), "-days", "1",
+        "-subj", "/CN=TL-Local-Test-CA",
+        "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run([
+        "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(leaf_key), "-out", str(csr),
+        "-subj", "/CN=localhost",
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run([
+        "openssl", "x509", "-req", "-in", str(csr),
+        "-CA", str(ca_cert), "-CAkey", str(ca_key), "-CAcreateserial",
+        "-out", str(leaf_cert), "-days", "1", "-sha256", "-extfile", str(extensions),
     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(str(cert), str(key))
+    ctx.load_cert_chain(str(leaf_cert), str(leaf_key))
     server.socket = ctx.wrap_socket(server.socket, server_side=True)
     runner = threading.Thread(target=server.serve_forever, daemon=True)
     runner.start()
     try:
         subprocess.run([
             "cargo", "run", "--locked", "--offline", "--quiet", "--example", "tls_probe",
-            "--", f"https://localhost:{server.server_port}/", str(cert)
+            "--", f"https://127.0.0.1:{server.server_port}/", str(ca_cert)
         ], cwd=Path(__file__).resolve().parents[1], check=True, timeout=90)
         print("TLS untrusted refusal + custom CA acceptance: PASS")
     finally:

@@ -75,14 +75,14 @@ impl HttpTransport {
             _ => return Err(Error::InvalidRequest),
         }
         // No environment proxies or redirects, so Basic credentials stay at the selected origin.
-        // Pin the only allowed HTTP hostname to loopback, even if local DNS is changed.
+        // Pin the localhost hostname to loopback, even if local DNS is changed.
         // Literal loopback IPs are already accepted by the URL policy.
         let mut builder = HttpClient::builder()
             .no_proxy()
             .redirect(Policy::none())
             .pool_max_idle_per_host(0)
             .connect_timeout(Duration::from_secs(10));
-        if url.scheme() == "http" && url.host_str() == Some("localhost") {
+        if url.host_str() == Some("localhost") {
             let port = url.port_or_known_default().ok_or(Error::InvalidRequest)?;
             builder = builder.resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], port)));
         }
