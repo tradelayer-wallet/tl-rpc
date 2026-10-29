@@ -11,22 +11,31 @@ permissions:
 jobs:
   contract:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
-      - name: Unit and mock tests
+      - name: Resolve first transport lockfile
         working-directory: rust/tl-rpc-client
-        run: cargo test --locked --offline
+        run: |
+          cargo generate-lockfile
+          cargo fetch
+          echo "LOCKFILE_BEGIN"
+          base64 -w0 Cargo.lock
+          echo
+          echo "LOCKFILE_END"
+      - name: Unit, integration and mock tests
+        working-directory: rust/tl-rpc-client
+        run: cargo test --offline
       - name: Source-derived wire parity
         working-directory: rust/tl-rpc-client
         run: node scripts/verify-wire.cjs
       - name: Clippy
         working-directory: rust/tl-rpc-client
-        run: cargo clippy --locked --offline --all-targets -- -D warnings
+        run: cargo clippy --offline --all-targets -- -D warnings
       - name: Format
         working-directory: rust/tl-rpc-client
         run: cargo fmt --all -- --check

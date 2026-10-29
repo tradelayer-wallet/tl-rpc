@@ -1,9 +1,12 @@
 [package]
 name = "tl-rpc-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.90"
-description = "Read-only TradeLayer RPC contract scaffold with an injected transport"
+description = "Read-only TradeLayer RPC client with bounded HTTPS transport"
 publish = false
 
 [dependencies]
+reqwest = { version = "=0.12.24", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.145"
