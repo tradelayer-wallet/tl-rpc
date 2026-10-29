@@ -1,10 +1,11 @@
-//! Offline RPC contract scaffold. A reviewed HTTP/JSON adapter is still required.
-//! Transport implementations must enforce the supplied deadline and streaming cap.
-//! This crate holds no credentials and provides no signing or broadcast operation.
+//! Read-only JSON-RPC contract with bounded HTTPS/loopback HTTP transport.
+//! There are no signing, broadcast or arbitrary-RPC method entrypoints.
 #![forbid(unsafe_code)]
 
 use std::fmt;
 use std::time::Duration;
+
+pub mod http;
 
 /// Largest integer represented exactly by the legacy JavaScript client.
 pub const MAX_WIRE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -177,12 +178,13 @@ pub struct Response<T> {
 pub enum TransportError {
     Timeout,
     Closed,
+    ResponseTooLarge,
+    MalformedResponse,
     Other(String),
 }
 
-/// Future adapters own HTTP/TLS and JSON decoding. They must cap bytes before
-/// allocation and cancel the socket when the whole exchange deadline expires.
-/// These obligations are a contract; the offline scaffold cannot enforce I/O.
+/// Adapters own HTTP/TLS and JSON decoding and must apply the deadline and
+/// streaming cap before allocating untrusted response bodies.
 pub trait Transport {
     type Value;
 
@@ -215,7 +217,11 @@ impl<T: Transport> Client<T> {
         let response = self
             .transport
             .exchange(&request, self.limits)
-            .map_err(Error::Transport)?;
+            .map_err(|e| match e {
+                TransportError::ResponseTooLarge => Error::ResponseTooLarge,
+                TransportError::MalformedResponse => Error::Malformed,
+                other => Error::Transport(other),
+            })?;
         if response.body_bytes > self.limits.max_response_bytes {
             return Err(Error::ResponseTooLarge);
         }

@@ -1,4 +1,4 @@
-name: Rust RPC foundation
+name: Rust RPC transport
 on:
   pull_request:
     paths: ['rust/**', '.github/workflows/rust-rpc.yml']
@@ -11,16 +11,22 @@ permissions:
 jobs:
   contract:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
-      - name: Unit and mock tests
+      - name: Fetch pinned crates
+        working-directory: rust/tl-rpc-client
+        run: cargo fetch --locked
+      - name: Unit and integration tests
         working-directory: rust/tl-rpc-client
         run: cargo test --locked --offline
+      - name: Synthetic TLS trust test
+        working-directory: rust/tl-rpc-client
+        run: python3 scripts/test-tls.py
       - name: Source-derived wire parity
         working-directory: rust/tl-rpc-client
         run: node scripts/verify-wire.cjs
