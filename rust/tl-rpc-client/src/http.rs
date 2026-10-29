@@ -4,10 +4,9 @@ use crate::{
     MAX_WIRE_INTEGER,
 };
 use reqwest::{
-    Client as HttpClient,
     header::{ACCEPT, ACCEPT_ENCODING, CONTENT_TYPE},
     redirect::Policy,
-    Url,
+    Client as HttpClient, Url,
 };
 use serde::{
     de::{self, MapAccess, Visitor},
@@ -16,7 +15,6 @@ use serde::{
 use serde_json::Value;
 use std::{
     fmt,
-    io::{self, Read},
     net::IpAddr,
     time::Duration,
 };
@@ -77,11 +75,17 @@ impl HttpTransport {
             _ => return Err(Error::InvalidRequest),
         }
         // No environment proxies or redirects, so Basic credentials stay at the selected origin.
+        // Pin the only allowed HTTP hostname to loopback, even if local DNS is changed.
+        // Literal loopback IPs are already accepted by the URL policy.
         let mut builder = HttpClient::builder()
             .no_proxy()
             .redirect(Policy::none())
             .pool_max_idle_per_host(0)
             .connect_timeout(Duration::from_secs(10));
+        if url.scheme() == "http" && url.host_str() == Some("localhost") {
+            let port = url.port_or_known_default().ok_or(Error::InvalidRequest)?;
+            builder = builder.resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+        }
         if let Some(pem) = ca_pem {
             if url.scheme() != "https" {
                 return Err(Error::InvalidRequest);
@@ -99,9 +103,19 @@ impl HttpTransport {
             .build()
             .map_err(|_| Error::Transport(TransportError::Other("TLS setup failed".into())))?;
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all().build()
-            .map_err(|_| Error::Transport(TransportError::Other("async runtime initialization failed".into())))?;
-        Ok(Self { url, credentials, client, runtime })
+            .enable_all()
+            .build()
+            .map_err(|_| {
+                Error::Transport(TransportError::Other(
+                    "async runtime initialization failed".into(),
+                ))
+            })?;
+        Ok(Self {
+            url,
+            credentials,
+            client,
+            runtime,
+        })
     }
 }
 fn is_loopback_host(host: &str) -> bool {
@@ -115,21 +129,39 @@ fn is_loopback_host(host: &str) -> bool {
 }
 impl Transport for HttpTransport {
     type Value = Value;
-    fn exchange(&mut self, request: &Request, limits: Limits) -> Result<Response<Value>, TransportError> {
+    fn exchange(
+        &mut self,
+        request: &Request,
+        limits: Limits,
+    ) -> Result<Response<Value>, TransportError> {
         let call = async {
-            let mut response = self.client.post(self.url.clone())
+            let mut response = self
+                .client
+                .post(self.url.clone())
                 .basic_auth(&self.credentials.username, Some(&self.credentials.password))
                 .header(CONTENT_TYPE, "application/json")
                 .header(ACCEPT, "application/json")
                 .header(ACCEPT_ENCODING, "identity")
                 .body(request.body().to_vec())
-                .send().await.map_err(map_reqwest_error)?;
+                .send()
+                .await
+                .map_err(map_reqwest_error)?;
             let status_code = response.status().as_u16();
             if status_code == 401 {
-                return Ok(Response { id: None, status_code, body_bytes: 0, outcome: Outcome::Malformed });
+                return Ok(Response {
+                    id: None,
+                    status_code,
+                    body_bytes: 0,
+                    outcome: Outcome::Malformed,
+                });
             }
             if !(200..300).contains(&status_code) && status_code != 500 {
-                return Ok(Response { id: Some(request.id()), status_code, body_bytes: 0, outcome: Outcome::Result(Value::Null) });
+                return Ok(Response {
+                    id: Some(request.id()),
+                    status_code,
+                    body_bytes: 0,
+                    outcome: Outcome::Result(Value::Null),
+                });
             }
             let max = limits.max_response_bytes();
             if response.content_length().is_some_and(|n| n > max as u64) {
@@ -144,22 +176,34 @@ impl Transport for HttpTransport {
                 }
                 bytes.extend_from_slice(&chunk);
             }
-            let reply: WireReply = serde_json::from_slice(&bytes).map_err(|_| TransportError::MalformedResponse)?;
+            let reply: WireReply =
+                serde_json::from_slice(&bytes).map_err(|_| TransportError::MalformedResponse)?;
             let outcome = match reply.outcome {
                 ParsedOutcome::Result(v) => Outcome::Result(v),
                 ParsedOutcome::Fault { code, message } => Outcome::RpcError { code, message },
             };
-            Ok(Response { id: reply.id, status_code, body_bytes: bytes.len(), outcome })
+            Ok(Response {
+                id: reply.id,
+                status_code,
+                body_bytes: bytes.len(),
+                outcome,
+            })
         };
         self.runtime.block_on(async {
             tokio::time::timeout(limits.timeout(), call)
-                .await.map_err(|_| TransportError::Timeout)?
+                .await
+                .map_err(|_| TransportError::Timeout)?
         })
     }
 }
 fn map_reqwest_error(err: reqwest::Error) -> TransportError {
-    if err.is_timeout() { TransportError::Timeout }
-    else { TransportError::Other("HTTP/TLS request failed".into()) }
+    if err.is_timeout() {
+        TransportError::Timeout
+    } else if err.is_body() || err.is_decode() {
+        TransportError::Closed
+    } else {
+        TransportError::Other("HTTP/TLS request failed".into())
+    }
 }
 
 #[derive(Deserialize)]

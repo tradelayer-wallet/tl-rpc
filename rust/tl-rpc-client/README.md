@@ -17,12 +17,12 @@ only for loopback hostnames/IPs. URL credentials, query strings and fragments ar
 rejected. Redirects and environment proxies are disabled to avoid forwarding
 Basic credentials. No certificate-verification bypass is offered.
 
-The blocking reqwest transport has a per-request deadline, checks advertised body
+The Tokio/reqwest transport uses a cancellable whole-exchange deadline and checks advertised body
 size and reads through a cap+1 streaming reader (1 MiB default, 16 MiB absolute
 configurable maximum). Unsupported content encodings are not enabled. HTTP 401,
 other HTTP failures, JSON-RPC error codes, and malformed bodies are distinguished.
 There are no automatic retries. Errors and Debug output never contain credentials.
-Only the configured endpoint is contacted.
+Only the configured endpoint is contacted. The HTTP hostname localhost is pinned to 127.0.0.1.
 
 For the legacy bestBlock workflow, best_block_height first calls
 getbestblockhash, then getblock, accepting genesis height zero.
