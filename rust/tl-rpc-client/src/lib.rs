@@ -79,7 +79,8 @@ impl Request {
                 ("validateaddress", quote(&address))
             }
         };
-        let body = format!("{{\"id\":{id},\"method\":\"{method}\",\"params\":[{params}]}}").into_bytes();
+        let body =
+            format!("{{\"id\":{id},\"method\":\"{method}\",\"params\":[{params}]}}").into_bytes();
         Ok(Self { id, body })
     }
 
@@ -389,7 +390,10 @@ mod tests {
         let mut client = Client::new(mock, Limits::default());
         client.next_id = MAX_WIRE_INTEGER;
         let _ = client.call(ReadCall::GetBlockCount);
-        assert_eq!(client.call(ReadCall::GetBlockCount), Err(Error::IdExhausted));
+        assert_eq!(
+            client.call(ReadCall::GetBlockCount),
+            Err(Error::IdExhausted)
+        );
         assert_eq!(client.into_transport().seen.len(), 1);
     }
 
@@ -433,7 +437,13 @@ mod tests {
     fn utf8_content_length_uses_bytes() {
         let r = Request::new(7, ReadCall::ValidateAddress("é中🚀".into())).unwrap();
         assert_eq!(r.content_length(), r.body().len());
-        assert!(r.content_length() > String::from_utf8(r.body().to_vec()).unwrap().chars().count());
+        assert!(
+            r.content_length()
+                > String::from_utf8(r.body().to_vec())
+                    .unwrap()
+                    .chars()
+                    .count()
+        );
     }
 
     #[test]
