@@ -13,11 +13,7 @@ use serde::{
     Deserialize, Deserializer,
 };
 use serde_json::Value;
-use std::{
-    fmt,
-    net::IpAddr,
-    time::Duration,
-};
+use std::{fmt, net::IpAddr, time::Duration};
 
 /// A credential pair with no fallback defaults. Debug never exposes secrets.
 pub struct Credentials {
@@ -84,7 +80,10 @@ impl HttpTransport {
             .connect_timeout(Duration::from_secs(10));
         if url.host_str() == Some("localhost") {
             let port = url.port_or_known_default().ok_or(Error::InvalidRequest)?;
-            builder = builder.resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+            builder = builder.resolve(
+                "localhost",
+                std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            );
         }
         if let Some(pem) = ca_pem {
             if url.scheme() != "https" {

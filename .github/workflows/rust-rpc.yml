@@ -1,4 +1,4 @@
-name: Rust RPC foundation
+name: Rust RPC transport
 on:
   pull_request:
     paths: ['rust/**', '.github/workflows/rust-rpc.yml']
@@ -21,16 +21,6 @@ jobs:
       - name: Fetch pinned crates
         working-directory: rust/tl-rpc-client
         run: cargo fetch --locked
-      - name: Format sources for review
-        working-directory: rust/tl-rpc-client
-        run: |
-          cargo fmt --all
-          for file in src/lib.rs src/http.rs tests/transport.rs examples/tls_probe.rs; do
-            echo "FORMAT_BEGIN $file"
-            base64 -w0 "$file"
-            echo
-            echo "FORMAT_END $file"
-          done
       - name: Unit and integration tests
         working-directory: rust/tl-rpc-client
         run: cargo test --locked --offline
