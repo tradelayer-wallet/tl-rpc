@@ -214,11 +214,14 @@ impl<T: Transport> Client<T> {
     pub fn call(&mut self, call: ReadCall) -> Result<T::Value, Error> {
         let request = Request::new(self.next_id, call)?;
         self.next_id += 1; // The validated ID is at most 2^53 - 1.
-        let response = self.transport.exchange(&request, self.limits).map_err(|e| match e {
-            TransportError::ResponseTooLarge => Error::ResponseTooLarge,
-            TransportError::MalformedResponse => Error::Malformed,
-            other => Error::Transport(other),
-        })?;
+        let response = self
+            .transport
+            .exchange(&request, self.limits)
+            .map_err(|e| match e {
+                TransportError::ResponseTooLarge => Error::ResponseTooLarge,
+                TransportError::MalformedResponse => Error::Malformed,
+                other => Error::Transport(other),
+            })?;
         if response.body_bytes > self.limits.max_response_bytes {
             return Err(Error::ResponseTooLarge);
         }
