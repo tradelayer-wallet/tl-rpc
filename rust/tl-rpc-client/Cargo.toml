@@ -1,0 +1,9 @@
+[package]
+name = "tl-rpc-client"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Read-only TradeLayer RPC contract scaffold with an injected transport"
+publish = false
+
+[dependencies]
