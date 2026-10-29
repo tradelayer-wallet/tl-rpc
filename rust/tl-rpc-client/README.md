@@ -1,60 +1,65 @@
-# tl-rpc-client: offline contract foundation
+# TradeLayer RPC Rust transport (RUST-06)
 
-Status: draft. This additive crate leaves the TypeScript package and its consumers unchanged.
-It contains a closed set of read-only calls, a UTF-8 request encoder, typed decoded
-responses and an injected transport interface with mock tests. HTTP/TLS, raw JSON
-response parsing, credentials, TradeLayer-specific RPC methods and production integration
-remain follow-up work. No network adapter is shipped. Never use this scaffold to hold keys.
+This additive Rust crate retains the original TypeScript client unchanged while
+introducing read-only HTTP/JSON-RPC support. No production endpoint is configured.
+
+## Architecture
+
+The closed ReadCall enum exposes six safe read operations. Request serialization
+uses the pinned legacy {id,method,params} format; it has no jsonrpc="2.0" field.
+Only exact numeric response IDs are accepted. Body JSON errors, duplicate envelope
+keys, contradictory result/error fields and oversized replies fail closed.
+An explicit JSON null result remains valid; an RPC fault with result:null is valid.
+
+HttpTransport requires explicit credentials. HTTPS validates certificate chains
+with system/bundled trust and optionally an additional PEM CA. Plain HTTP is allowed
+only for loopback hostnames/IPs. URL credentials, query strings and fragments are
+rejected. Redirects and environment proxies are disabled to avoid forwarding
+Basic credentials. No certificate-verification bypass is offered.
+
+The blocking reqwest transport has a per-request deadline, checks advertised body
+size and reads through a cap+1 streaming reader (1 MiB default, 16 MiB absolute
+configurable maximum). Unsupported content encodings are not enabled. HTTP 401,
+other HTTP failures, JSON-RPC error codes, and malformed bodies are distinguished.
+There are no automatic retries. Errors and Debug output never contain credentials.
+Only the configured endpoint is contacted.
+
+For the legacy bestBlock workflow, best_block_height first calls
+getbestblockhash, then getblock, accepting genesis height zero.
 
 ## Verification
 
-With Rust 1.90.0 (rustfmt and clippy) and Node installed:
+Toolchain Rust 1.90.0. Node, Python 3 and OpenSSL are needed for fixture tests.
 
-```sh
-cd rust/tl-rpc-client
-cargo fmt --all -- --check
-cargo test --locked --offline
-cargo clippy --locked --offline --all-targets -- -D warnings
-node scripts/verify-wire.cjs
-```
+    cd rust/tl-rpc-client
+    cargo test --locked --offline
+    node scripts/verify-wire.cjs
+    python3 scripts/test-tls.py
+    cargo clippy --locked --offline --all-targets -- -D warnings
+    cargo fmt --all -- --check
 
-There are zero third-party Rust dependencies. The wire oracle executes the request-object
-expression from `src/main/rpc-client.ts`, pinned to blob
-`94649945b9603395f115de23541dea25a9f88949` at upstream commit
-`53bdd90c2b72dd7e8e8fc0100fed138b23666f33`. Its clock returns ID 7 so dynamic IDs
-can be compared. The Rust example emits ten byte-exact cases, including Unicode,
-control characters and a method-injection-shaped string. These tests cover the selected
-request encoder only. They do not establish full HTTP, response-parser or node parity.
+The golden-wire script runs the request-object expression from the upstream
+TypeScript source pinned to blob 94649945b9603395f115de23541dea25a9f88949.
+It compares ten exact request serializations. Keep this baseline until the
+existing TypeScript hardening PR #2 is reviewed and intentionally rebased.
 
-Security PR #2 remains independent. After it merges, inspect its changed source and
-explicitly rebaseline the oracle. Existing production TypeScript vulnerabilities remain
-tracked in #1/#2. This scaffold does not remediate the deployed client.
+Integration tests use ephemeral localhost HTTP and HTTPS fixtures. They exercise
+authentication headers, UTF-8 byte lengths, HTTP 401/500/503 and redirects,
+RPC fault preservation, duplicate/ambiguous keys, ID matching, nested depth,
+streaming cap, stalled headers/body, truncated responses and the two-step
+height-zero call. TLS fixtures generate a disposable localhost CA via OpenSSL.
 
-## Boundary and acceptance criteria
+## Boundaries
 
-* `Request` only accepts the six `ReadCall` variants; there is no arbitrary-method API.
-  The body follows the existing `{id,method,params}` envelope. JSON-RPC 2.0 support must
-  be negotiated separately. IDs increase per client, including after transport failures,
-  and stop at JavaScript's exact-integer boundary. Heights use checked integers.
-* `content_length()` counts UTF-8 bytes. `ValidateAddress` strings are bounded and escaped;
-  chain/address validity belongs to the selected node. `GetBlock` requires 64 hex digits.
-* A future transport must bound response bytes while reading, cap JSON depth, reject
-  duplicate or contradictory envelope fields, correlate IDs and cancel the socket on
-  the whole-exchange deadline. `Limits` is passed to adapters; the current mocks cannot
-  prove socket cancellation, pre-allocation bounds or TLS behavior. The post-decode size
-  check alone is insufficient to protect a production adapter.
-* `Outcome::Result(None::<T>)` represents a successful JSON null. `Malformed` covers a
-  missing result/error or a parse failure. RPC errors retain their signed error code,
-  including when Core responds with HTTP 500. A successful-looking body on HTTP failure
-  is rejected. HTTP 401 gets a dedicated error. Missing/mismatched IDs fail closed.
+This is application transport, separate from patrickdugan/TradeLayer-Rust's
+consensus/ledger/replay crate. TLS, serde and reqwest dependencies are pinned
+through Cargo.lock. HTTPS trust still relies on appropriate CA management and
+the caller's endpoint selection. Only synthetic credentials and local mock
+servers are exercised in CI. Signing, key migration, production deployment
+and extension integration require separate review. The frontend and npm
+package still use the existing TypeScript implementation until cutover.
 
-The next PR must select and pin an HTTP/TLS and JSON implementation with a committed
-lockfile and dependency rationale, or reuse a reviewed existing adapter. Avoid writing
-new crypto or a generic JSON parser to satisfy a zero-dependency preference. Application
-transport dependencies stay outside `patrickdugan/TradeLayer-Rust`'s consensus crate.
-That repository retains ownership of ledger, matching and replay semantics.
-
-Transport acceptance tests: loopback mock server, stalled headers/body, truncated body,
-UTF-8 byte lengths, malformed/duplicate keys, ID mismatch, HTTP 401/500, TLS trust failure,
-response/depth limits, connection cleanup and zero retries. Production endpoint changes,
-wallet key migration and signing require separately reviewed work.
+Follow-up security review should cover DNS/loopback resolution assumptions,
+TLS trust-store policy, transport resource bounds under adversarial long-lived
+streams, request and response schema compatibility across Litecoin/Bitcoin
+node versions, and the broader set of TradeLayer-specific read methods.
