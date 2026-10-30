@@ -36,3 +36,25 @@ jobs:
       - name: Format
         working-directory: rust/tl-rpc-client
         run: cargo fmt --all -- --check
+  lean:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Build proofs
+        working-directory: rust/tl-rpc-client/lean
+        run: lake build
+      - name: Reject sorry/admit
+        working-directory: rust/tl-rpc-client/lean
+        run: "! grep -rnE '(^|[^A-Za-z_.])sorry([^A-Za-z_]|$)|^[[:space:]]*admit[[:space:]]*$' --include=*.lean ."
+      - name: Axiom audit
+        working-directory: rust/tl-rpc-client/lean
+        run: |
+          lake env lean AxiomCheck.lean | tee axioms.txt
+          ! grep -q sorryAx axioms.txt

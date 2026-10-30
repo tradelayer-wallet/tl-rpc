@@ -1,0 +1,5 @@
+name = "tl_rpc_client"
+defaultTargets = ["TlRpcClient"]
+
+[[lean_lib]]
+name = "TlRpcClient"

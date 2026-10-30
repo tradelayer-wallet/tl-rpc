@@ -63,3 +63,34 @@ Follow-up security review should cover DNS/loopback resolution assumptions,
 TLS trust-store policy, transport resource bounds under adversarial long-lived
 streams, request and response schema compatibility across Litecoin/Bitcoin
 node versions, and the broader set of TradeLayer-specific read methods.
+
+## Port coverage and Lean verification
+
+The legacy TypeScript surface is `RpcClient.call(method, ...args)` and
+`Complex.bestBlock()` (`src/main/rpc-client.ts`, `src/main/complex.ts`).
+`bestBlock` is ported as `best_block_height`. The arbitrary-method `call` is
+deliberately not ported: only the closed `ReadCall` set can reach the wire
+(repaired defect: the legacy client forwards any method, including wallet and
+broadcast RPCs, with default credentials `root`/`passsword`).
+
+`lean/` (Lean 4 v4.34.1, core only, no Mathlib) models three pieces of
+`src/lib.rs` and proves:
+
+| Theorem | Models | Statement |
+|---|---|---|
+| `unescape_escape`, `escape_injective` | `quote` | the JSON string escaping is decodable and injective, so distinct parameters never serialize identically |
+| `escape_no_control` | `quote` | the escaped body has no raw control character |
+| `escape1_quote_only_escaped` | `quote` | a quote appears only as the escape `\"`, so a parameter cannot close the literal |
+| `classify_ok` | `Client::call` checks | a value is returned only for a size-bounded 2xx response echoing the request id with a result |
+| `unauthorized_first`, `oversize_first`, `rpc_error_preserved` | same | check order and fault preservation |
+| `issue_in_range`, `exhausted_forever`, `run_strictly_increasing` | `Request::new` + `next_id` | ids are in 1..2^53-1, never wrap, and strictly increase per client |
+
+Characters are modelled as code points (`Nat`) and JSON decoding by the adapter is
+abstracted to `Outcome`. `decide` examples replay the unit-test vectors
+(`zero_height_is_valid`, `missing_id_is_rejected`, `unauthorized_precedes_body_shape`,
+`rpc_error_code_is_preserved`, `id_exhaustion_never_wraps`, ...). Run:
+
+    cd lean && lake build && lake env lean AxiomCheck.lean
+
+Axioms reported: only `propext`, `Quot.sound`, `Classical.choice`. The CI `lean`
+job in `.github/workflows/rust-rpc.yml` repeats this; it has not run (not pushed).
