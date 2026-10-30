@@ -94,3 +94,16 @@ abstracted to `Outcome`. `decide` examples replay the unit-test vectors
 
 Axioms reported: only `propext`, `Quot.sound`, `Classical.choice`. The CI `lean`
 job in `.github/workflows/rust-rpc.yml` repeats this; it has not run (not pushed).
+
+## Native-node integration
+
+`tests/regtest_node.rs` (ignored by default) drives every `ReadCall`, the
+`best_block_height` helper, RPC error-code preservation (`-5` unknown block, `-8`
+height beyond tip) and HTTP 401 handling against a real node. Run on 2026-10-30
+against Bitcoin Core 31.1 in a throwaway regtest datadir (synthetic credentials,
+`-listen=0`, 5 mined blocks), Rust 1.90.0 MSVC on Windows: 2 passed. Command:
+
+    TL_RPC_NODE_URL=http://127.0.0.1:18999 TL_RPC_NODE_USER=<u> TL_RPC_NODE_PASS=<p> \
+    TL_RPC_NODE_ADDRESS=<regtest address> cargo test --locked --test regtest_node -- --ignored
+
+Not run against Litecoin Core or a TradeLayer-enabled node (none available locally).
